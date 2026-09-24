@@ -1,0 +1,45 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-unknown-linux-musl # Raspberry Pi 3/4/5 with 64-bit OS
+          - armv7-unknown-linux-musleabihf # Raspberry Pi with 32-bit OS
+          - x86_64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cross
+        run: cargo install cross --locked
+      - name: Build
+        run: cross build --release --target ${{ matrix.target }}
+      - name: Rename artifact
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/airbnb-notifier dist/airbnb-notifier-${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: airbnb-notifier-${{ matrix.target }}
+          path: dist/airbnb-notifier-${{ matrix.target }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
