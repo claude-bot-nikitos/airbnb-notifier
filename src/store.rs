@@ -36,6 +36,7 @@ struct Data {
     searches: Vec<Search>,
 }
 
+#[derive(Debug)]
 pub struct Store {
     path: PathBuf,
     data: Data,
@@ -182,5 +183,25 @@ mod tests {
         st.get_mut(4).unwrap().paused = true;
         let due: Vec<u32> = st.due(1100, 600).iter().map(|s| s.id).collect();
         assert_eq!(due, vec![1, 3]);
+    }
+
+    #[test]
+    fn unreadable_or_corrupt_files_are_errors() {
+        let p = tmp("bad");
+        std::fs::create_dir_all(&p).unwrap(); // a directory, not a file
+        assert!(Store::load(&p).is_err());
+        let p = tmp("corrupt");
+        std::fs::write(&p, "{not json").unwrap();
+        assert!(Store::load(&p).unwrap_err().to_string().contains("parsing"));
+    }
+
+    #[test]
+    fn for_chat_filters() {
+        let mut st = Store::load(&tmp("forchat")).unwrap();
+        st.add(1, "a".into(), "u".into());
+        st.add(2, "b".into(), "u".into());
+        st.add(1, "c".into(), "u".into());
+        let names: Vec<&str> = st.for_chat(1).iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["a", "c"]);
     }
 }

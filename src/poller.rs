@@ -232,14 +232,13 @@ pub fn run(
     stop: Arc<AtomicBool>,
     config_path: &Path,
 ) {
+    let mut cfg = Config::default();
     while !stop.load(Ordering::Relaxed) {
-        let cfg = match Config::load(config_path) {
-            Ok(c) => c,
-            Err(e) => {
-                log::error!("config reload failed: {e:#}");
-                Config::default()
-            }
-        };
+        // A config broken by a hand edit must not stop the checks: keep the last good one.
+        match Config::load(config_path) {
+            Ok(c) => cfg = c,
+            Err(e) => log::error!("config reload failed, keeping the previous one: {e:#}"),
+        }
         let interval = (cfg.check_interval_minutes.max(1) * 60) as i64;
         // Jitter so requests don't happen at exactly the same times.
         let interval = interval + crate::util::jitter(60) as i64;
@@ -253,7 +252,7 @@ pub fn run(
                 break;
             }
             if i > 0 {
-                std::thread::sleep(Duration::from_millis(2000 + crate::util::jitter(3000)));
+                fetcher.pause();
             }
             log::info!("checking #{} '{}'", s.id, s.name);
             let result = fetcher.fetch_all(&s.url, cfg.max_pages);
@@ -327,15 +326,14 @@ mod tests {
         let o = apply(&mut st, 1, Ok(vec![listing(1), listing(2)]));
         assert!(matches!(o, Outcome::Baseline { count: 2, .. }));
         let o = apply(&mut st, 1, Ok(vec![listing(2), listing(3), listing(1)]));
-        match o {
-            Outcome::New {
-                listings, chat_id, ..
-            } => {
-                assert_eq!(chat_id, 5);
-                assert_eq!(listings.iter().map(|l| l.id).collect::<Vec<_>>(), vec![3]);
-            }
-            other => panic!("unexpected {other:?}"),
-        }
+        let Outcome::New {
+            listings, chat_id, ..
+        } = o
+        else {
+            unreachable!("expected New, got {o:?}")
+        };
+        assert_eq!(chat_id, 5);
+        assert_eq!(listings.iter().map(|l| l.id).collect::<Vec<_>>(), vec![3]);
         // Listings that dropped out and came back are not "new".
         let o = apply(&mut st, 1, Ok(vec![listing(1)]));
         assert!(matches!(o, Outcome::New { ref listings, .. } if listings.is_empty()));
@@ -359,9 +357,9 @@ mod tests {
         let mut st = store("alert");
         apply(&mut st, 1, Ok(vec![listing(1)]));
         let alerts: Vec<bool> = (0..5)
-            .map(|_| match apply(&mut st, 1, Err(anyhow::anyhow!("boom"))) {
-                Outcome::Failed { alert, .. } => alert,
-                _ => panic!(),
+            .map(|_| {
+                let o = apply(&mut st, 1, Err(anyhow::anyhow!("boom")));
+                matches!(o, Outcome::Failed { alert: true, .. })
             })
             .collect();
         assert_eq!(alerts, vec![false, false, true, false, false]);
@@ -419,5 +417,241 @@ mod tests {
         assert!(c.contains("Apartment in Lisbon"));
         assert!(c.contains("💰 €80 night"));
         assert!(c.contains("https://www.airbnb.com/rooms/42?check_in=2026-11-01"));
+    }
+
+    #[test]
+    fn report_sends_photos_and_handles_failures() {
+        let api = MockApi::default();
+        let mut with_photo = listing(1);
+        let mut without_photo = listing(2);
+        without_photo.picture = None;
+        with_photo.name = "Nice".into();
+        let new = Outcome::New {
+            chat_id: 5,
+            name: "L".into(),
+            url: "https://www.airbnb.com/s/L/homes".into(),
+            listings: vec![with_photo, without_photo],
+        };
+        report(&api, &new);
+        assert_eq!(api.photos.lock().unwrap().len(), 1);
+        assert_eq!(api.sent.lock().unwrap().len(), 1);
+
+        // Nothing to say for Gone, or for a failure below the alert threshold.
+        report(&api, &Outcome::Gone);
+        report(
+            &api,
+            &Outcome::Failed {
+                chat_id: 5,
+                id: 1,
+                name: "L".into(),
+                error: "x".into(),
+                alert: false,
+            },
+        );
+        assert_eq!(api.sent.lock().unwrap().len(), 1);
+
+        // Telegram being down is logged, never a panic.
+        let down = MockApi {
+            fail_all: true,
+            ..Default::default()
+        };
+        report(&down, &new);
+        let many = Outcome::New {
+            chat_id: 5,
+            name: "L".into(),
+            url: "u".into(),
+            listings: (1..=11).map(listing).collect(),
+        };
+        report(&down, &many);
+        report(
+            &down,
+            &Outcome::Baseline {
+                chat_id: 5,
+                id: 1,
+                name: "L".into(),
+                count: 0,
+            },
+        );
+    }
+
+    #[test]
+    fn caption_uses_title_when_name_is_missing() {
+        let l = Listing {
+            id: 1,
+            title: "Home in Porto".into(),
+            ..Default::default()
+        };
+        let c = listing_caption("P", "https://www.airbnb.com/s/P/homes", &l);
+        assert!(c.contains("<b>Home in Porto</b>"));
+        assert_eq!(c.matches("Home in Porto").count(), 1);
+        assert!(!c.contains("💰"));
+        assert!(!c.contains("⭐"));
+    }
+
+    /// Runs the poller loop in-process against a fake Airbnb page server.
+    #[test]
+    fn run_loop_checks_due_searches_and_stops() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        // Minimal page server: every request gets a page with listings 1 and 2.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let body = format!(
+                    "<script type=\"application/json\">{}</script>",
+                    serde_json::json!({"staysSearch": {"searchResults": [
+                        {"__typename": "StaySearchResult", "listingId": 1},
+                        {"__typename": "StaySearchResult", "listingId": 2}
+                    ]}})
+                );
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+
+        let dir = std::env::temp_dir().join(format!("abn-run-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config.toml");
+        let cfg_path = cfg.clone();
+        let good = Config {
+            allowed_users: vec![5],
+            ..Config::default()
+        };
+        good.save(&cfg).unwrap();
+
+        let mut st = Store::load(&dir.join("s.json")).unwrap();
+        st.add(5, "A".into(), "https://www.airbnb.com/s/A/homes".into());
+        st.add(5, "B".into(), "https://www.airbnb.com/s/B/homes".into());
+        // A file where the data directory should be, so saving fails (logged).
+        let st = {
+            let mut broken = Store::load(&dir.join("blocked/s.json")).unwrap();
+            std::fs::write(dir.join("blocked"), "file").unwrap();
+            for s in st.all() {
+                broken.add(s.chat_id, s.name.clone(), s.url.clone());
+            }
+            broken
+        };
+        let store = Arc::new(Mutex::new(st));
+        let fetcher = Arc::new(
+            Fetcher::new(&[])
+                .unwrap()
+                .with_page_delay(Duration::ZERO)
+                .with_origin(&origin)
+                .unwrap(),
+        );
+        let api = Arc::new(MockApi::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
+
+        let handle = {
+            let (api, store, fetcher, stop) =
+                (api.clone(), store.clone(), fetcher.clone(), stop.clone());
+            let cfg = cfg.clone();
+            std::thread::spawn(move || run(api, store, fetcher, rx, stop, &cfg))
+        };
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while api.sent.lock().unwrap().len() < 2 {
+            assert!(std::time::Instant::now() < deadline, "no baselines");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(store.lock().unwrap().all().iter().all(|s| s.initialized));
+
+        // Let the wait loop time out at least once.
+        std::thread::sleep(Duration::from_millis(1200));
+        // Break the config by hand, force a re-check: the last good config is
+        // kept, so the search is still checked.
+        std::fs::write(&cfg_path, "max_pages = \"many\"").unwrap();
+        store.lock().unwrap().get_mut(1).unwrap().last_check = 0;
+        tx.send(()).unwrap();
+        tx.send(()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while store.lock().unwrap().all()[0].last_check == 0 {
+            assert!(std::time::Instant::now() < deadline, "not re-checked");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        stop.store(true, Ordering::Relaxed);
+        handle.join().unwrap();
+
+        // Stops promptly while waiting; exits when the channel closes too.
+        let (tx2, rx2) = mpsc::channel::<()>();
+        drop(tx2);
+        let empty = Arc::new(Mutex::new(Store::load(&dir.join("none.json")).unwrap()));
+        run(
+            api.clone(),
+            empty.clone(),
+            fetcher.clone(),
+            rx2,
+            Arc::new(AtomicBool::new(false)),
+            &dir.join("config.toml"),
+        );
+        // Already stopped: returns without checking anything.
+        let (_tx3, rx3) = mpsc::channel::<()>();
+        let two = Arc::new(Mutex::new(Store::load(&dir.join("two.json")).unwrap()));
+        two.lock()
+            .unwrap()
+            .add(5, "x".into(), "https://www.airbnb.com/s/x/homes".into());
+        two.lock()
+            .unwrap()
+            .add(5, "y".into(), "https://www.airbnb.com/s/y/homes".into());
+        let stopped = Arc::new(AtomicBool::new(true));
+        run(
+            api.clone(),
+            two.clone(),
+            fetcher.clone(),
+            rx3,
+            stopped,
+            &cfg_path,
+        );
+        assert!(two.lock().unwrap().all().iter().all(|s| !s.initialized));
+
+        // Stop requested while the first search is being checked: the second
+        // one is left for next time and the loop exits.
+        std::fs::write(&cfg_path, "allowed_users = [5]").unwrap();
+        let stop_mid = Arc::new(AtomicBool::new(false));
+        let slow = TcpListener::bind("127.0.0.1:0").unwrap();
+        let slow_origin = format!("http://{}", slow.local_addr().unwrap());
+        {
+            let stop_mid = stop_mid.clone();
+            std::thread::spawn(move || {
+                for stream in slow.incoming() {
+                    let mut stream = stream.unwrap();
+                    let _ = stream.read(&mut [0u8; 4096]);
+                    stop_mid.store(true, Ordering::Relaxed);
+                    let body = "<script type=\"application/json\">{\"staysSearch\":{}}</script>";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                }
+            });
+        }
+        let slow_fetcher = Arc::new(
+            Fetcher::new(&[])
+                .unwrap()
+                .with_origin(&slow_origin)
+                .unwrap(),
+        );
+        let (_tx4, rx4) = mpsc::channel::<()>();
+        run(api, two.clone(), slow_fetcher, rx4, stop_mid, &cfg_path);
+        let inits: Vec<bool> = two
+            .lock()
+            .unwrap()
+            .all()
+            .iter()
+            .map(|s| s.initialized)
+            .collect();
+        assert_eq!(inits, [true, false]);
     }
 }

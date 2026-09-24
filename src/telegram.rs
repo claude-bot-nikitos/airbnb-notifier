@@ -23,13 +23,15 @@ pub enum Update {
 pub type Keyboard = Vec<Vec<(String, String)>>;
 
 pub struct Telegram {
+    api_url: String,
     token: String,
     agent: ureq::Agent,
 }
 
 impl Telegram {
-    pub fn new(token: &str) -> Telegram {
+    pub fn new(api_url: &str, token: &str) -> Telegram {
         Telegram {
+            api_url: api_url.trim_end_matches('/').to_string(),
             token: token.to_string(),
             agent: ureq::AgentBuilder::new()
                 .timeout(Duration::from_secs(60))
@@ -39,7 +41,7 @@ impl Telegram {
 
     /// Calls a Bot API method. Errors never include the URL, which holds the token.
     fn call(&self, method: &str, body: Value) -> Result<Value> {
-        let url = format!("https://api.telegram.org/bot{}/{method}", self.token);
+        let url = format!("{}/bot{}/{method}", self.api_url, self.token);
         let resp: Value = match self.agent.post(&url).send_json(body) {
             Ok(r) => r.into_json()?,
             Err(ureq::Error::Status(code, r)) => {
@@ -209,6 +211,8 @@ mod tests {
             r#"[
               {"update_id": 10, "message": {"text": "/start", "chat": {"id": 5}, "from": {"id": 7}}},
               {"update_id": 11, "message": {"chat": {"id": 5}, "from": {"id": 7}, "photo": []}},
+              {"update_id": 12, "edited_message": {"text": "x", "chat": {"id": 5}, "from": {"id": 7}}},
+              {"update_id": 12, "callback_query": {"id": "incomplete"}},
               {"update_id": 12, "callback_query": {"id": "q", "from": {"id": 7}, "data": "p:3",
                 "message": {"message_id": 99, "chat": {"id": 5}}}}
             ]"#,

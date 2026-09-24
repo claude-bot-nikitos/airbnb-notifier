@@ -53,6 +53,8 @@ pub struct Bot<A: Api> {
     pub config_path: PathBuf,
     /// chat_id → search id waiting for a new name.
     pending_rename: HashMap<i64, u32>,
+    /// Last config that loaded; used if the file is broken by a hand edit.
+    last_config: Option<Config>,
 }
 
 impl<A: Api> Bot<A> {
@@ -70,6 +72,7 @@ impl<A: Api> Bot<A> {
             wake,
             config_path,
             pending_rename: HashMap::new(),
+            last_config: None,
         }
     }
 
@@ -85,14 +88,17 @@ impl<A: Api> Bot<A> {
         }
     }
 
-    fn allowed(&self, user_id: i64) -> bool {
+    /// Access is re-read from the config on every update, so `user add`
+    /// works without a restart.
+    fn allowed(&mut self, user_id: i64) -> bool {
         match Config::load(&self.config_path) {
-            Ok(c) => c.is_allowed(user_id),
-            Err(e) => {
-                log::error!("config reload failed: {e:#}");
-                false
-            }
+            Ok(c) => self.last_config = Some(c),
+            Err(e) => log::error!("config reload failed, keeping the previous one: {e:#}"),
         }
+        // Never loaded successfully → nobody gets in.
+        self.last_config
+            .as_ref()
+            .is_some_and(|c| c.is_allowed(user_id))
     }
 
     pub fn handle(&mut self, update: Update) {
@@ -455,15 +461,27 @@ pub mod tests {
         pub photos: Mutex<Vec<(i64, String, String)>>,
         pub edits: Mutex<Vec<(i64, i64, String)>>,
         pub fail_photos: bool,
+        /// Every call fails, like Telegram being down.
+        pub fail_all: bool,
+    }
+
+    impl MockApi {
+        fn check(&self) -> Result<()> {
+            if self.fail_all {
+                return Err(anyhow::anyhow!("telegram down"));
+            }
+            Ok(())
+        }
     }
 
     impl Api for MockApi {
         fn send(&self, chat_id: i64, html: &str, _kb: Option<&Keyboard>) -> Result<()> {
+            self.check()?;
             self.sent.lock().unwrap().push((chat_id, html.to_string()));
             Ok(())
         }
         fn send_photo(&self, chat_id: i64, photo: &str, caption: &str) -> Result<()> {
-            if self.fail_photos {
+            if self.fail_photos || self.fail_all {
                 return Err(anyhow::anyhow!("bad photo"));
             }
             self.photos
@@ -479,6 +497,7 @@ pub mod tests {
             html: &str,
             _kb: Option<&Keyboard>,
         ) -> Result<()> {
+            self.check()?;
             self.edits
                 .lock()
                 .unwrap()
@@ -486,11 +505,15 @@ pub mod tests {
             Ok(())
         }
         fn answer_callback(&self, _id: &str, _text: &str) -> Result<()> {
-            Ok(())
+            self.check()
         }
     }
 
     fn setup(name: &str) -> (Bot<MockApi>, mpsc::Receiver<()>) {
+        setup_with(name, MockApi::default())
+    }
+
+    fn setup_with(name: &str, api: MockApi) -> (Bot<MockApi>, mpsc::Receiver<()>) {
         let dir = std::env::temp_dir().join(format!("abn-bot-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -504,7 +527,7 @@ pub mod tests {
         let store = Store::load(&dir.join("searches.json")).unwrap();
         let (tx, rx) = mpsc::channel();
         let bot = Bot::new(
-            Arc::new(MockApi::default()),
+            Arc::new(api),
             Arc::new(Mutex::new(store)),
             Arc::new(Fetcher::new(&[]).unwrap()),
             tx,
@@ -612,5 +635,168 @@ pub mod tests {
             .add(8, "theirs".into(), "u".into());
         bot.handle(msg("/delete 1", 7));
         assert_eq!(bot.store.lock().unwrap().all().len(), 1);
+    }
+
+    fn tap(data: &str, user: i64) -> Update {
+        Update::Callback {
+            id: "q".into(),
+            chat_id: user,
+            user_id: user,
+            message_id: 5,
+            data: data.into(),
+        }
+    }
+
+    fn last_edit(bot: &Bot<MockApi>) -> String {
+        bot.api.edits.lock().unwrap().last().unwrap().2.clone()
+    }
+
+    #[test]
+    fn usage_messages_for_bad_arguments() {
+        let (mut bot, _rx) = setup("usage");
+        for (cmd, expect) in [
+            ("/pause", "Usage: /pause"),
+            ("/resume x", "Usage: /resume"),
+            ("/delete", "Usage: /delete"),
+            ("/rename", "Usage: /rename"),
+            ("/rename abc name", "Usage: /rename"),
+            ("/rename 9", "No search #9"),
+            ("/pause 9", "No search #9"),
+            ("/rename 9 new", "No search #9"),
+            ("/check", "No active searches"),
+            ("/list@my_bot", "no searches yet"),
+        ] {
+            bot.handle(msg(cmd, 7));
+            assert!(
+                last_sent(&bot).contains(expect),
+                "{cmd} → {}",
+                last_sent(&bot)
+            );
+        }
+    }
+
+    #[test]
+    fn rename_command_without_name_asks_for_it() {
+        let (mut bot, _rx) = setup("askname");
+        bot.handle(msg("https://www.airbnb.com/s/Rome/homes", 7));
+        bot.handle(msg("/list", 7)); // clears the pending "name it" prompt
+        bot.handle(msg("/rename #1", 7));
+        assert!(last_sent(&bot).contains("Send me the new name"));
+        bot.handle(msg("  Roma  ", 7));
+        assert_eq!(bot.store.lock().unwrap().all()[0].name, "Roma");
+        // Names are capped.
+        bot.handle(msg(&format!("/rename 1 {}", "x".repeat(300)), 7));
+        assert_eq!(bot.store.lock().unwrap().all()[0].name.chars().count(), 100);
+    }
+
+    #[test]
+    fn button_edge_cases() {
+        let (mut bot, _rx) = setup("buttons-edge");
+        bot.handle(msg("https://www.airbnb.com/s/Rome/homes", 7));
+        // Malformed or unknown data is ignored.
+        for data in ["garbage", "p:x", "zz:1"] {
+            bot.handle(tap(data, 7));
+        }
+        assert!(bot.api.edits.lock().unwrap().is_empty());
+        assert!(!bot.store.lock().unwrap().all()[0].paused);
+        // Delete → Cancel restores the card.
+        bot.handle(tap("d:1", 7));
+        bot.handle(tap("c:1", 7));
+        assert!(last_edit(&bot).contains("#1 Rome"));
+        // Resume button.
+        bot.handle(tap("p:1", 7));
+        bot.handle(tap("r:1", 7));
+        assert!(last_edit(&bot).contains("active") || last_edit(&bot).contains("loading"));
+        // Unauthorized taps do nothing.
+        bot.handle(tap("D:1", 99));
+        assert_eq!(bot.store.lock().unwrap().all().len(), 1);
+    }
+
+    #[test]
+    fn telegram_failures_do_not_break_handling() {
+        let api = MockApi {
+            fail_all: true,
+            ..Default::default()
+        };
+        let (mut bot, rx) = setup_with("tg-down", api);
+        bot.handle(msg("https://www.airbnb.com/s/Rome/homes", 7));
+        assert!(rx.try_recv().is_ok());
+        bot.handle(msg("/list", 7));
+        bot.handle(tap("p:1", 7));
+        bot.handle(tap("d:1", 7));
+        bot.handle(tap("D:1", 7));
+        assert!(bot.store.lock().unwrap().all().is_empty());
+    }
+
+    #[test]
+    fn broken_config_keeps_last_good_access_list() {
+        let (mut bot, _rx) = setup("badcfg");
+        let good = std::fs::read_to_string(&bot.config_path).unwrap();
+        std::fs::write(&bot.config_path, "allowed_users = 5").unwrap();
+        // Never loaded → fail closed.
+        bot.handle(msg("/start", 7));
+        assert!(last_sent(&bot).contains("not allowed"));
+        std::fs::write(&bot.config_path, good).unwrap();
+        bot.handle(msg("/start", 7));
+        assert!(last_sent(&bot).contains("Airbnb notifier"));
+        // Broken later → previous list still applies.
+        std::fs::write(&bot.config_path, "allowed_users = 5").unwrap();
+        bot.handle(msg("/start", 7));
+        assert!(last_sent(&bot).contains("Airbnb notifier"));
+        bot.handle(msg("/start", 8));
+        assert!(last_sent(&bot).contains("not allowed"));
+    }
+
+    #[test]
+    fn unwritable_store_is_logged_not_fatal() {
+        let (mut bot, _rx) = setup("unwritable");
+        let dir = bot.config_path.parent().unwrap().to_path_buf();
+        *bot.store.lock().unwrap() = Store::load(&dir.join("sub/searches.json")).unwrap();
+        // A file where the data directory should be: every save fails.
+        std::fs::write(dir.join("sub"), "not a dir").unwrap();
+        bot.handle(msg("https://www.airbnb.com/s/Rome/homes", 7));
+        bot.handle(msg("/pause 1", 7));
+        assert!(bot.store.lock().unwrap().all()[0].paused, "kept in memory");
+        assert!(last_sent(&bot).contains("Paused"));
+    }
+
+    #[test]
+    fn card_shows_status_age_and_error() {
+        let mut s = Search {
+            id: 3,
+            chat_id: 1,
+            name: "A&B".into(),
+            url: "https://www.airbnb.com/s/x/homes?a=1&b=2".into(),
+            paused: false,
+            initialized: false,
+            seen: Default::default(),
+            created_at: 0,
+            last_check: 0,
+            last_error: None,
+            failures: 0,
+        };
+        let c = card(&s);
+        assert!(c.contains("#3 A&amp;B"));
+        assert!(c.contains("loading"));
+        assert!(c.contains("checked never"));
+        assert!(c.contains("a=1&amp;b=2"));
+        s.initialized = true;
+        s.last_error = Some("HTTP <403>".into());
+        let now = now_ts();
+        for (ago_secs, expect) in [
+            (5, "just now"),
+            (120, "2 min ago"),
+            (7200, "2 h ago"),
+            (3 * 86400, "3 d ago"),
+        ] {
+            s.last_check = now - ago_secs;
+            let c = card(&s);
+            assert!(c.contains(expect), "{c}");
+            assert!(c.contains("active"));
+            assert!(c.contains("Last error: HTTP &lt;403&gt;"));
+        }
+        s.paused = true;
+        assert!(card(&s).contains("paused"));
+        assert_eq!(card_keyboard(&s)[0][0].1, "r:3");
     }
 }

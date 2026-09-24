@@ -73,4 +73,24 @@ mod tests {
         assert_eq!(truncate("héllo", 10), "héllo");
         assert_eq!(truncate("héllo", 3), "hé…");
     }
+
+    #[test]
+    fn jitter_range() {
+        assert_eq!(jitter(0), 0);
+        assert!((0..100).all(|_| jitter(7) < 7));
+    }
+
+    #[test]
+    fn atomic_write_replaces_content() {
+        let dir = std::env::temp_dir().join(format!("abn-util-{}", std::process::id()));
+        let p = dir.join("deep/er/file.txt");
+        write_atomic(&p, b"one").unwrap();
+        write_atomic(&p, b"two").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "two");
+        assert!(!dir.join("deep/er/.file.txt.tmp").exists());
+        // Relative path in the current directory has an empty parent.
+        let name = format!("abn-util-rel-{}.txt", std::process::id());
+        write_atomic(Path::new(&name), b"x").unwrap();
+        std::fs::remove_file(&name).unwrap();
+    }
 }

@@ -12,6 +12,12 @@ fn default_max_pages() -> u32 {
 fn default_data_file() -> PathBuf {
     "searches.json".into()
 }
+fn default_page_delay_ms() -> u64 {
+    1500
+}
+fn default_telegram_api_url() -> String {
+    "https://api.telegram.org".into()
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Config {
@@ -27,6 +33,17 @@ pub struct Config {
     pub data_file: PathBuf,
     #[serde(default)]
     pub proxies: Vec<String>,
+
+    // Advanced settings, only written to the file when changed.
+    /// Pause between Airbnb page requests (a random 0–2s is added).
+    #[serde(default = "default_page_delay_ms")]
+    pub page_delay_ms: u64,
+    /// Bot API server, e.g. a self-hosted one.
+    #[serde(default = "default_telegram_api_url")]
+    pub telegram_api_url: String,
+    /// Fetch searches from this origin instead of Airbnb (for testing).
+    #[serde(default)]
+    pub airbnb_origin: Option<String>,
 }
 
 impl Default for Config {
@@ -38,6 +55,9 @@ impl Default for Config {
             max_pages: default_max_pages(),
             data_file: default_data_file(),
             proxies: vec![],
+            page_delay_ms: default_page_delay_ms(),
+            telegram_api_url: default_telegram_api_url(),
+            airbnb_origin: None,
         }
     }
 }
@@ -46,13 +66,7 @@ impl Config {
     /// Loads the config. A missing file yields defaults. `TELEGRAM_BOT_TOKEN`
     /// overrides `bot_token`.
     pub fn load(path: &Path) -> Result<Config> {
-        let mut cfg = match std::fs::read_to_string(path) {
-            Ok(text) => {
-                toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
-            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
-        };
+        let mut cfg = Config::load_raw(path)?;
         if let Ok(t) = std::env::var("TELEGRAM_BOT_TOKEN")
             && !t.trim().is_empty()
         {
@@ -131,6 +145,22 @@ impl Config {
             s(&self.data_file.to_string_lossy()),
             list(self.proxies.iter().map(|p| s(p)).collect()),
         );
+        let defaults = Config::default();
+        let mut advanced = Vec::new();
+        if self.page_delay_ms != defaults.page_delay_ms {
+            advanced.push(format!("page_delay_ms = {}", self.page_delay_ms));
+        }
+        if self.telegram_api_url != defaults.telegram_api_url {
+            advanced.push(format!("telegram_api_url = {}", s(&self.telegram_api_url)));
+        }
+        if let Some(o) = &self.airbnb_origin {
+            advanced.push(format!("airbnb_origin = {}", s(o)));
+        }
+        let body = if advanced.is_empty() {
+            body
+        } else {
+            format!("{body}\n# Advanced\n{}\n", advanced.join("\n"))
+        };
         crate::util::write_atomic(path, body.as_bytes())
     }
 }
@@ -161,5 +191,55 @@ mod tests {
         };
         c.save(&p).unwrap();
         assert_eq!(Config::load_raw(&p).unwrap(), c);
+        assert!(!std::fs::read_to_string(&p).unwrap().contains("Advanced"));
+
+        let adv = Config {
+            page_delay_ms: 0,
+            telegram_api_url: "http://127.0.0.1:1".into(),
+            airbnb_origin: Some("http://127.0.0.1:2".into()),
+            ..c
+        };
+        adv.save(&p).unwrap();
+        assert_eq!(Config::load_raw(&p).unwrap(), adv);
+    }
+
+    #[test]
+    fn validation() {
+        let ok = Config {
+            bot_token: "t".into(),
+            ..Config::default()
+        };
+        assert!(ok.validate_for_run().is_ok());
+        assert!(Config::default().validate_for_run().is_err());
+        let zero_interval = Config {
+            check_interval_minutes: 0,
+            ..ok.clone()
+        };
+        assert!(
+            zero_interval
+                .validate_for_run()
+                .unwrap_err()
+                .to_string()
+                .contains("interval")
+        );
+        let zero_pages = Config { max_pages: 0, ..ok };
+        assert!(
+            zero_pages
+                .validate_for_run()
+                .unwrap_err()
+                .to_string()
+                .contains("max_pages")
+        );
+    }
+
+    #[test]
+    fn unreadable_file_is_an_error_and_data_file_is_relative_to_config() {
+        let dir = std::env::temp_dir().join(format!("abn-cfg2-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("a-directory")).unwrap();
+        assert!(Config::load(&dir.join("a-directory")).is_err());
+        let c = Config::load(&dir.join("missing.toml")).unwrap();
+        assert_eq!(c.data_file, dir.join("searches.json"));
+        let c = Config::load(std::path::Path::new("missing-here.toml")).unwrap();
+        assert_eq!(c.data_file, PathBuf::from("searches.json"));
     }
 }

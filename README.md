@@ -98,6 +98,17 @@ data_file = "searches.json"         # relative to the config file
 proxies = []                        # see below
 ```
 
+If you break the file while the bot runs (a typo while editing), the bot logs
+an error and keeps using the last version that loaded.
+
+Advanced, rarely needed:
+
+```toml
+page_delay_ms = 1500                          # pause between Airbnb requests (+0–2s random)
+telegram_api_url = "https://api.telegram.org" # e.g. a self-hosted Bot API server
+airbnb_origin = "http://127.0.0.1:8080"       # testing only: fetch searches from a fake server
+```
+
 ## Avoiding blocks
 
 The bot reads the same search page your browser loads, at a low rate: one page
@@ -125,6 +136,40 @@ If Airbnb starts blocking you, the bot says so after 3 failed checks in a row.
 
 Test the setup with `airbnb-notifier test '<search url>'`. It uses the same
 proxies and prints what it found.
+
+## Development
+
+```bash
+cargo test                     # unit, integration and end-to-end tests
+cargo llvm-cov --all-targets --ignore-filename-regex '/tests/'   # coverage (~99% of lines)
+```
+
+The tests don't need network access:
+
+- **`tests/real_payload.rs`** parses a genuine Airbnb search payload captured in
+  September 2026 (`tests/fixtures`). When Airbnb changes its format, replace the
+  fixture with a fresh capture and these tests show what broke.
+- **`tests/fetcher.rs`** runs the Airbnb client against a local fake Airbnb:
+  pagination, blocks, captcha pages, short-link resolution, and proxy rotation
+  and authentication.
+- **`tests/e2e.rs`** starts the real binary against a fake Telegram Bot API and
+  a fake Airbnb, then plays a whole chat session: unknown user, sharing a link,
+  the silent baseline, naming, new-listing alerts, the buttons, blocking and
+  recovery, revoking access, and restart without duplicate alerts.
+- **`tests/cli.rs`** covers `init`, `user` and `test`.
+
+CI also cross-compiles the Raspberry Pi binary (`aarch64-unknown-linux-musl`)
+and runs the whole suite on it under qemu. To do that locally:
+
+```bash
+rustup target add aarch64-unknown-linux-musl   # plus: apt install clang qemu-user-static
+export CC_aarch64_unknown_linux_musl=clang \
+  CFLAGS_aarch64_unknown_linux_musl=--target=aarch64-unknown-linux-musl \
+  CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
+  CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUNNER=qemu-aarch64-static \
+  TEST_BIN_RUNNER=qemu-aarch64-static
+cargo test --target aarch64-unknown-linux-musl
+```
 
 ## Limitations
 

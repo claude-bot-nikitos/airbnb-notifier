@@ -40,13 +40,34 @@ pub struct Listing {
 #[derive(Debug, Default)]
 pub struct Page {
     pub listings: Vec<Listing>,
+    /// `paginationInfo.nextPageCursor`, when Airbnb provides it.
     pub next_cursor: Option<String>,
+    /// `paginationInfo.pageCursors`: one cursor per result page, first page first.
+    pub page_cursors: Vec<String>,
+}
+
+impl Page {
+    /// The cursor of the page after the one fetched with `current`.
+    pub fn cursor_after(&self, current: Option<&str>) -> Option<String> {
+        if let Some(c) = &self.next_cursor {
+            return Some(c.clone());
+        }
+        let next = match current {
+            None => 1,
+            Some(cur) => self.page_cursors.iter().position(|c| c == cur)? + 1,
+        };
+        self.page_cursors.get(next).cloned()
+    }
 }
 
 pub struct Fetcher {
     /// (label for logs, agent). One per proxy, or a single direct agent.
     agents: Vec<(String, ureq::Agent)>,
     current: AtomicUsize,
+    /// Replaces scheme/host/port of search URLs when fetching (for tests).
+    origin: Option<Url>,
+    /// Base pause between result pages; a random 0–2s is added.
+    page_delay: Duration,
 }
 
 impl Fetcher {
@@ -59,6 +80,7 @@ impl Fetcher {
         };
         let mut agents = Vec::new();
         for p in proxies {
+            validate_proxy(p)?;
             let proxy =
                 ureq::Proxy::new(p).map_err(|e| anyhow!("bad proxy '{}': {e}", redact(p)))?;
             agents.push((redact(p), builder().proxy(proxy).build()));
@@ -69,7 +91,28 @@ impl Fetcher {
         Ok(Fetcher {
             agents,
             current: AtomicUsize::new(0),
+            origin: None,
+            page_delay: Duration::from_millis(1500),
         })
+    }
+
+    /// Sends search requests to `origin` (e.g. `http://127.0.0.1:8080`) instead
+    /// of Airbnb. Used by tests.
+    pub fn with_origin(mut self, origin: &str) -> Result<Fetcher> {
+        self.origin = Some(Url::parse(origin).map_err(|e| anyhow!("bad origin '{origin}': {e}"))?);
+        Ok(self)
+    }
+
+    pub fn with_page_delay(mut self, delay: Duration) -> Fetcher {
+        self.page_delay = delay;
+        self
+    }
+
+    /// Politeness pause between requests (page delay plus up to 2s of jitter).
+    pub fn pause(&self) {
+        if !self.page_delay.is_zero() {
+            std::thread::sleep(self.page_delay + Duration::from_millis(crate::util::jitter(2000)));
+        }
     }
 
     /// Runs `f` with the current agent; on failure rotates to the next proxy
@@ -136,7 +179,7 @@ impl Fetcher {
     }
 
     pub fn fetch_page(&self, search_url: &str, cursor: Option<&str>) -> Result<Page> {
-        let url = page_url(search_url, cursor)?;
+        let url = page_url(search_url, cursor, self.origin.as_ref())?;
         let (_, html) = self.with_rotation(|a| {
             let (u, html) = Self::get_html(a, &url)?;
             // A page without search data usually means a captcha/block page,
@@ -158,23 +201,39 @@ impl Fetcher {
         let mut cursor: Option<String> = None;
         for page_no in 0..max_pages {
             if page_no > 0 {
-                std::thread::sleep(Duration::from_millis(1500 + crate::util::jitter(2000)));
+                self.pause();
             }
-            let page = self.fetch_page(search_url, cursor.as_deref())?;
+            let mut page = self.fetch_page(search_url, cursor.as_deref())?;
             let before = out.len();
-            for l in page.listings {
+            for l in std::mem::take(&mut page.listings) {
                 if seen.insert(l.id) {
                     out.push(l);
                 }
             }
             log::debug!("page {}: {} new listings", page_no + 1, out.len() - before);
-            match page.next_cursor {
+            // Stop when there is no next page, or when a page brought nothing new
+            // (protects against cursors that loop).
+            match page.cursor_after(cursor.as_deref()) {
                 Some(c) if out.len() > before && Some(&c) != cursor.as_ref() => cursor = Some(c),
                 _ => break,
             }
         }
         Ok(out)
     }
+}
+
+/// ureq accepts almost any string as a proxy, so check it properly: a typo
+/// should fail at startup, not as mysterious request errors later.
+fn validate_proxy(p: &str) -> Result<()> {
+    let bad = |why: &str| anyhow!("bad proxy '{}': {why}", redact(p));
+    let u = Url::parse(p).map_err(|_| bad("expected e.g. http://user:pass@host:port"))?;
+    if !["http", "socks4", "socks4a", "socks5"].contains(&u.scheme()) {
+        return Err(bad("scheme must be http, socks4, socks4a or socks5"));
+    }
+    if u.host_str().is_none_or(str::is_empty) {
+        return Err(bad("missing host"));
+    }
+    Ok(())
 }
 
 /// Hides credentials in a proxy URL for logging.
@@ -223,8 +282,14 @@ pub fn normalize(url: &Url) -> String {
     u.to_string()
 }
 
-fn page_url(search_url: &str, cursor: Option<&str>) -> Result<String> {
+fn page_url(search_url: &str, cursor: Option<&str>, origin: Option<&Url>) -> Result<String> {
     let mut u = Url::parse(search_url)?;
+    if let Some(o) = origin {
+        let mut replaced = o.clone();
+        replaced.set_path(u.path());
+        replaced.set_query(u.query());
+        u = replaced;
+    }
     if let Some(c) = cursor {
         u.query_pairs_mut()
             .append_pair("cursor", c)
@@ -335,9 +400,8 @@ fn json_scripts(html: &str) -> Vec<&str> {
 }
 
 pub fn parse_page(html: &str) -> Result<Page> {
-    let mut found: Vec<Listing> = Vec::new();
+    let mut page = Page::default();
     let mut index: HashMap<u64, usize> = HashMap::new();
-    let mut cursor = None;
     let mut saw_search = false;
     for script in json_scripts(html) {
         if !script.contains("StaySearchResult") && !script.contains("staysSearch") {
@@ -347,27 +411,24 @@ pub fn parse_page(html: &str) -> Result<Page> {
             continue;
         };
         let mut raw = Vec::new();
-        walk(&v, &mut raw, &mut cursor, &mut saw_search);
+        walk(&v, &mut raw, &mut page, &mut saw_search);
         for l in raw {
             match index.get(&l.id) {
                 // The same listing appears in the list and on the map; merge.
-                Some(&i) => merge(&mut found[i], l),
+                Some(&i) => merge(&mut page.listings[i], l),
                 None => {
-                    index.insert(l.id, found.len());
-                    found.push(l);
+                    index.insert(l.id, page.listings.len());
+                    page.listings.push(l);
                 }
             }
         }
     }
-    if !saw_search && found.is_empty() {
+    if !saw_search && page.listings.is_empty() {
         return Err(anyhow!(
             "no search data in the page (blocked, captcha, or Airbnb changed its format)"
         ));
     }
-    Ok(Page {
-        listings: found,
-        next_cursor: cursor,
-    })
+    Ok(page)
 }
 
 fn merge(into: &mut Listing, other: Listing) {
@@ -386,7 +447,7 @@ fn merge(into: &mut Listing, other: Listing) {
     }
 }
 
-fn walk(v: &Value, out: &mut Vec<Listing>, cursor: &mut Option<String>, saw_search: &mut bool) {
+fn walk(v: &Value, out: &mut Vec<Listing>, page: &mut Page, saw_search: &mut bool) {
     match v {
         Value::Object(map) => {
             let is_result = map.get("__typename").and_then(Value::as_str)
@@ -399,33 +460,49 @@ fn walk(v: &Value, out: &mut Vec<Listing>, cursor: &mut Option<String>, saw_sear
             for (k, child) in map {
                 match k.as_str() {
                     "staysSearch" => *saw_search = true,
-                    "paginationInfo" => {
-                        if let Some(c) = child.get("nextPageCursor").and_then(Value::as_str)
-                            && !c.is_empty()
-                        {
-                            *cursor = Some(c.to_string());
-                        }
-                    }
+                    "paginationInfo" => read_pagination(child, page),
                     _ => {}
                 }
-                walk(child, out, cursor, saw_search);
+                walk(child, out, page, saw_search);
             }
         }
         Value::Array(items) => {
             for child in items {
-                walk(child, out, cursor, saw_search);
+                walk(child, out, page, saw_search);
             }
         }
         _ => {}
     }
 }
 
-fn str_at<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
+fn read_pagination(info: &Value, page: &mut Page) {
+    if let Some(c) = text(info, &["nextPageCursor"]) {
+        page.next_cursor = Some(c);
+    }
+    if let Some(list) = info.get("pageCursors").and_then(Value::as_array) {
+        let cursors: Vec<String> = list
+            .iter()
+            .filter_map(|c| c.as_str().filter(|c| !c.is_empty()).map(str::to_string))
+            .collect();
+        if !cursors.is_empty() {
+            page.page_cursors = cursors;
+        }
+    }
+}
+
+/// The string at `path`, with runs of whitespace (including newlines and
+/// non-breaking spaces) collapsed to single spaces. `None` if missing or blank.
+fn text(v: &Value, path: &[&str]) -> Option<String> {
     let mut cur = v;
     for p in path {
         cur = cur.get(p)?;
     }
-    cur.as_str().map(str::trim).filter(|s| !s.is_empty())
+    let s = cur
+        .as_str()?
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!s.is_empty()).then_some(s)
 }
 
 fn id_from(v: &Value) -> Option<u64> {
@@ -440,7 +517,7 @@ fn id_from(v: &Value) -> Option<u64> {
 fn decode_global_id(s: &str) -> Option<u64> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(s).ok()?;
     let text = String::from_utf8(bytes).ok()?;
-    let digits = text.rsplit(':').next()?;
+    let (_, digits) = text.rsplit_once(':')?;
     digits.parse().ok()
 }
 
@@ -452,71 +529,76 @@ fn parse_listing(v: &Value) -> Option<Listing> {
         .or_else(|| v.get("listingId").and_then(id_from))
         .or_else(|| v.get("propertyId").and_then(id_from))?;
 
-    let name = str_at(
+    let name = text(
         v,
-        &[
-            "demandStayListing",
-            "description",
-            "name",
-            "localizedStringWithTranslationPreference",
-        ],
+        &["nameLocalized", "localizedStringWithTranslationPreference"],
     )
     .or_else(|| {
-        str_at(
+        text(
             v,
-            &["nameLocalized", "localizedStringWithTranslationPreference"],
+            &[
+                "demandStayListing",
+                "description",
+                "name",
+                "localizedStringWithTranslationPreference",
+            ],
         )
     })
-    .or_else(|| str_at(v, &["listing", "name"]))
-    .or_else(|| str_at(v, &["subtitle"]))
-    .unwrap_or_default()
-    .to_string();
-    let title = str_at(v, &["title"])
-        .or_else(|| str_at(v, &["listing", "title"]))
-        .unwrap_or_default()
-        .to_string();
+    .or_else(|| text(v, &["listing", "name"]))
+    .unwrap_or_default();
+    let title = text(v, &["title"])
+        .or_else(|| text(v, &["listing", "title"]))
+        .or_else(|| text(v, &["subtitle"]))
+        .unwrap_or_default();
 
-    let mut details: Vec<&str> = Vec::new();
+    // e.g. "2 bedrooms", "20–25 Sept". Distances are relative to wherever the
+    // request came from, so they are noise here.
+    let mut details: Vec<String> = Vec::new();
     for line in ["primaryLine", "secondaryLine"] {
-        if let Some(items) = v
+        let items = v
             .pointer(&format!("/structuredContent/{line}"))
-            .and_then(Value::as_array)
-        {
-            details.extend(items.iter().filter_map(|i| str_at(i, &["body"])));
+            .and_then(Value::as_array);
+        for item in items.into_iter().flatten() {
+            if item.get("type").and_then(Value::as_str) == Some("DISTANCE") {
+                continue;
+            }
+            if let Some(body) = text(item, &["body"])
+                && !details.contains(&body)
+            {
+                details.push(body);
+            }
         }
     }
 
     let sdp = v.get("structuredDisplayPrice").unwrap_or(&Value::Null);
     let mut price_parts: Vec<String> = Vec::new();
-    let current = str_at(sdp, &["primaryLine", "discountedPrice"])
-        .or_else(|| str_at(sdp, &["primaryLine", "price"]));
+    let current = text(sdp, &["primaryLine", "discountedPrice"])
+        .or_else(|| text(sdp, &["primaryLine", "price"]));
     if let Some(p) = current {
-        let mut s = p.to_string();
-        if let Some(orig) = str_at(sdp, &["primaryLine", "originalPrice"])
+        let mut s = p.clone();
+        if let Some(orig) = text(sdp, &["primaryLine", "originalPrice"])
             && orig != p
         {
             s = format!("{p} (was {orig})");
         }
-        if let Some(q) = str_at(sdp, &["primaryLine", "qualifier"]) {
+        if let Some(q) = text(sdp, &["primaryLine", "qualifier"]) {
             s = format!("{s} {q}");
         }
         price_parts.push(s);
-    } else if let Some(a) = str_at(sdp, &["primaryLine", "accessibilityLabel"]) {
-        price_parts.push(a.to_string());
+    } else if let Some(a) = text(sdp, &["primaryLine", "accessibilityLabel"]) {
+        price_parts.push(a);
     }
-    if let Some(total) = str_at(sdp, &["secondaryLine", "price"]) {
-        price_parts.push(total.to_string());
+    if let Some(total) = text(sdp, &["secondaryLine", "price"]) {
+        price_parts.push(total);
     }
 
-    let rating = str_at(v, &["avgRatingLocalized"])
-        .or_else(|| str_at(v, &["avgRatingA11yLabel"]))
-        .unwrap_or_default()
-        .to_string();
+    let rating = text(v, &["avgRatingLocalized"])
+        .or_else(|| text(v, &["avgRatingA11yLabel"]))
+        .unwrap_or_default();
     let picture = v
         .get("contextualPictures")
         .and_then(Value::as_array)
-        .and_then(|a| a.iter().find_map(|p| str_at(p, &["picture"])))
-        .map(str::to_string);
+        .and_then(|a| a.iter().find_map(|p| text(p, &["picture"])));
 
     Some(Listing {
         id,
@@ -628,7 +710,12 @@ mod tests {
 
     #[test]
     fn page_url_adds_cursor() {
-        let u = page_url("https://www.airbnb.com/s/L/homes?adults=2", Some("c=1")).unwrap();
+        let u = page_url(
+            "https://www.airbnb.com/s/L/homes?adults=2",
+            Some("c=1"),
+            None,
+        )
+        .unwrap();
         assert_eq!(
             u,
             "https://www.airbnb.com/s/L/homes?adults=2&cursor=c%3D1&pagination_search=true"
@@ -684,8 +771,122 @@ mod tests {
     }
 
     #[test]
+    fn validates_proxies() {
+        for ok in [
+            "http://h:8080",
+            "http://u:p@h:1",
+            "socks5://10.0.0.2:1080",
+            "socks4://h:1",
+        ] {
+            assert!(validate_proxy(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "h:8080",
+            "not a proxy",
+            "ftp://h:1",
+            "https://h:1",
+            "http://:1",
+            "socks5:/x",
+        ] {
+            assert!(validate_proxy(bad).is_err(), "{bad}");
+        }
+        let err = validate_proxy("ftp://bob:hunter2@h:1")
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("hunter2"), "{err}");
+    }
+
+    #[test]
     fn redacts_proxy_credentials() {
         assert_eq!(redact("http://user:pw@h:8080"), "http://***@h:8080/");
         assert_eq!(redact("socks5://h:1080"), "socks5://h:1080");
+    }
+
+    #[test]
+    fn tolerates_malformed_html() {
+        // Unclosed tag, unclosed script, and invalid JSON that mentions the markers.
+        assert!(parse_page("<script type=\"application/json\"").is_err());
+        assert!(parse_page("<script type=\"application/json\">{\"staysSearch\":").is_err());
+        let bad_json = "<script type=\"application/json\">{staysSearch: nope}</script>";
+        assert!(parse_page(bad_json).is_err());
+        // A later valid block still counts.
+        let ok = format!("{bad_json}{}", sample_html());
+        assert_eq!(parse_page(&ok).unwrap().listings.len(), 3);
+    }
+
+    #[test]
+    fn id_shapes() {
+        let v = serde_json::json!({"__typename": "StaySearchResult", "listingId": 77});
+        assert_eq!(parse_listing(&v).unwrap().id, 77);
+        let v = serde_json::json!({"__typename": "StaySearchResult", "propertyId": "88"});
+        assert_eq!(parse_listing(&v).unwrap().id, 88);
+        let v = serde_json::json!({"__typename": "StaySearchResult", "listingId": true});
+        assert!(parse_listing(&v).is_none());
+        let v = serde_json::json!({"__typename": "StaySearchResult", "listingId": "!!notbase64"});
+        assert!(parse_listing(&v).is_none());
+        // Results without any id are skipped, but still walked into.
+        let html = format!(
+            "<script type=\"application/json\">{}</script>",
+            serde_json::json!({"staysSearch": {"x": {"__typename": "StaySearchResult"}}})
+        );
+        assert!(parse_page(&html).unwrap().listings.is_empty());
+    }
+
+    #[test]
+    fn price_falls_back_to_accessibility_label() {
+        let v = serde_json::json!({
+            "listingId": 1,
+            "__typename": "StaySearchResult",
+            "structuredDisplayPrice": {"primaryLine": {"accessibilityLabel": "$90\u{00a0}per night"}}
+        });
+        assert_eq!(parse_listing(&v).unwrap().price, "$90 per night");
+        let v = serde_json::json!({
+            "listingId": 1,
+            "__typename": "StaySearchResult",
+            "structuredDisplayPrice": {"primaryLine": {"price": "€5", "originalPrice": "€5"}}
+        });
+        assert_eq!(
+            parse_listing(&v).unwrap().price,
+            "€5",
+            "same original price is not shown"
+        );
+    }
+
+    #[test]
+    fn odd_urls() {
+        assert_eq!(default_name("not a url"), "Airbnb search");
+        assert!(!is_airbnb_host(&Url::parse("mailto:a@airbnb.com").unwrap()));
+        assert!(is_airbnb_host(
+            &Url::parse("https://fr.airbnb.ca/s/x").unwrap()
+        ));
+        assert!(is_airbnb_host(
+            &Url::parse("https://www.airbnb.com.au/s/x").unwrap()
+        ));
+        assert!(!is_airbnb_host(
+            &Url::parse("https://airbnb.example.co.uk/s/x").unwrap()
+        ));
+        // Only paging params are dropped; with none left there is no "?".
+        let u = Url::parse("https://www.airbnb.com/s/x/homes?cursor=1").unwrap();
+        assert_eq!(normalize(&u), "https://www.airbnb.com/s/x/homes");
+        // Room links without search params, and a bad search url.
+        assert_eq!(
+            listing_url("https://www.airbnb.com/s/x/homes", 5),
+            "https://www.airbnb.com/rooms/5"
+        );
+        assert_eq!(listing_url("garbage", 5), "https://www.airbnb.com/rooms/5");
+    }
+
+    #[test]
+    fn pause_waits_for_the_configured_delay() {
+        let f = Fetcher::new(&[])
+            .unwrap()
+            .with_page_delay(Duration::from_millis(30));
+        let t = std::time::Instant::now();
+        f.pause();
+        assert!(t.elapsed() >= Duration::from_millis(30));
+        let f = f.with_page_delay(Duration::ZERO);
+        let t = std::time::Instant::now();
+        f.pause();
+        assert!(t.elapsed() < Duration::from_millis(30));
     }
 }

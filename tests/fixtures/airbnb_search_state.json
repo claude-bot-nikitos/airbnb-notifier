@@ -1,0 +1,637 @@
+{
+ "niobeClientData": [
+  [
+   null,
+   {
+    "data": {
+     "presentation": {
+      "staysSearch": {
+       "results": {
+        "searchResults": [
+         {
+          "__typename": "StaySearchResult",
+          "avgRatingA11yLabel": "4.96 out of 5 average rating",
+          "avgRatingLocalized": "4.96",
+          "listingParamOverrides": {
+           "__typename": "ExploreListingParamOverrides",
+           "adults": 2,
+           "categoryTag": null,
+           "causeId": null,
+           "checkin": "2026-09-20",
+           "checkout": "2026-09-25",
+           "children": 0,
+           "distanceInKm": null,
+           "highlightType": null,
+           "infants": 0,
+           "pets": 0,
+           "photoId": "2634812768",
+           "relaxedAmenityIds": [],
+           "splitStaysLocationPrecisions": [],
+           "splitStaysLocationsAcpIds": [],
+           "splitStaysUuid": null,
+           "amenities": null
+          },
+          "structuredDisplayPrice": {
+           "__typename": "StructuredDisplayPrice",
+           "primaryLine": {
+            "__typename": "QualifiedDisplayPriceLine",
+            "accessibilityLabel": "$257 USD for 5 nights",
+            "price": "$257 USD",
+            "qualifier": "for 5 nights",
+            "concatQualifierLeft": false,
+            "trailing": null
+           },
+           "secondaryLine": null,
+           "explanationData": {
+            "__typename": "DisplayPriceExplanationData",
+            "title": "Price details",
+            "subtitle": null,
+            "priceDetails": [
+             {
+              "__typename": "DisplayPriceExplanationLineGroup",
+              "items": [
+               {
+                "__typename": "DefaultExplanationLineItem",
+                "description": "5 nights x $51.35 USD",
+                "priceString": "$256.76 USD",
+                "explanationData": null
+               }
+              ],
+              "renderBorderTop": false,
+              "collapsable": null
+             }
+            ]
+           },
+           "explanationDataDisplayPosition": "PRIMARY_LINE",
+           "displayPriceStyle": "TOTAL_ONLY",
+           "loggingMetadata": {
+            "__typename": "StructuredDisplayPriceLoggingMetadata",
+            "loggingCorrelationId": "b84e06e9-9c67-43ef-bae7-50f51665460f"
+           }
+          },
+          "badges": [
+           {
+            "__typename": "ExploreFormattedBadge",
+            "icon": null,
+            "loggingContext": {
+             "__typename": "ExploreFormattedBadgeLoggingContext",
+             "badgeType": "GUEST_FAVORITE"
+            },
+            "style": "LOUD_ROUNDED_PILL",
+            "text": "Guest favourite",
+            "textAccessibilityLabel": "Guest favourite",
+            "textColor": "#000000"
+           }
+          ],
+          "title": null,
+          "subtitle": null,
+          "nameLocalized": {
+           "__typename": "UGCText",
+           "localizedStringWithTranslationPreference": "The Doze Depot 32"
+          },
+          "propertyId": null,
+          "structuredContent": {
+           "__typename": "ExploreStructuredContent",
+           "distance": [],
+           "mapCategoryInfo": null,
+           "mapPrimaryLine": [],
+           "mapSecondaryLine": [
+            {
+             "__typename": "MainSectionMessage",
+             "body": "20–25 Sept",
+             "bodyA11yLabel": null,
+             "bodyType": null,
+             "fontWeight": null,
+             "headline": null,
+             "type": "DATE"
+            }
+           ],
+           "primaryLine": [
+            {
+             "__typename": "MainSectionMessage",
+             "body": "12,958 kilometres away",
+             "bodyA11yLabel": null,
+             "bodyType": null,
+             "fontWeight": null,
+             "headline": null,
+             "type": "DISTANCE"
+            }
+           ],
+           "secondaryLine": [
+            {
+             "__typename": "MainSectionMessage",
+             "body": "20–25 Sept",
+             "bodyA11yLabel": null,
+             "bodyType": null,
+             "fontWeight": null,
+             "headline": null,
+             "type": "DATE"
+            }
+           ],
+           "tertiaryLine": [],
+           "reviewSnippet": null,
+           "explanation": []
+          },
+          "demandStayListing": {
+           "__typename": "DemandStayListing",
+           "id": "RGVtYW5kU3RheUxpc3Rpbmc6MTY4NjI2NjA2NzA4NjMyOTQxMw==",
+           "location": {
+            "__typename": "DemandStayListingLocation",
+            "coordinate": {
+             "__typename": "Coordinate",
+             "latitude": 35.2152,
+             "longitude": -80.9085
+            }
+           },
+           "description": {
+            "__typename": "DemandStayListingDescription",
+            "name": {
+             "__typename": "UGCText",
+             "localizedStringWithTranslationPreference": "The Doze Depot 32"
+            }
+           },
+           "wishlistItems": [],
+           "nameLocale": "en-IN"
+          }
+         },
+         {
+          "__typename": "StaySearchResult",
+          "avgRatingA11yLabel": "New place to stay",
+          "avgRatingLocalized": "New",
+          "listingParamOverrides": {
+           "__typename": "ExploreListingParamOverrides",
+           "adults": 2,
+           "categoryTag": null,
+           "causeId": null,
+           "checkin": "2026-09-20",
+           "checkout": "2026-09-25",
+           "children": 0,
+           "distanceInKm": null,
+           "highlightType": null,
+           "infants": 0,
+           "pets": 0,
+           "photoId": null,
+           "relaxedAmenityIds": [],
+           "splitStaysLocationPrecisions": [],
+           "splitStaysLocationsAcpIds": [],
+           "splitStaysUuid": null,
+           "amenities": null
+          },
+          "structuredDisplayPrice": {
+           "__typename": "StructuredDisplayPrice",
+           "primaryLine": {
+            "__typename": "DiscountedDisplayPriceLine",
+            "accessibilityLabel": "$489 USD for 5 nights, originally $560 USD",
+            "discountedPrice": "$489 USD",
+            "originalPrice": "$560 USD",
+            "qualifier": "for 5 nights",
+            "concatQualifierLeft": false,
+            "trailing": null
+           },
+           "secondaryLine": null,
+           "explanationData": {
+            "__typename": "DisplayPriceExplanationData",
+            "title": "Price details",
+            "subtitle": null,
+            "priceDetails": [
+             {
+              "__typename": "DisplayPriceExplanationLineGroup",
+              "items": [
+               {
+                "__typename": "DefaultExplanationLineItem",
+                "description": "5 nights x $112.00 USD",
+                "priceString": "$560.00 USD",
+                "explanationData": null
+               },
+               {
+                "__typename": "DiscountedExplanationLineItem",
+                "description": "Last-minute discount",
+                "priceString": "-$71.25 USD",
+                "originalPriceString": null,
+                "explanationData": null
+               }
+              ],
+              "renderBorderTop": false,
+              "collapsable": null
+             },
+             {
+              "__typename": "DisplayPriceExplanationLineGroup",
+              "items": [
+               {
+                "__typename": "HighlightExplanationLineItem",
+                "description": "Price after discount",
+                "priceString": "$488.75 USD",
+                "explanationData": null,
+                "originalPriceString": null,
+                "accessibilityLabel": "$488.75 USD total before taxes"
+               }
+              ],
+              "renderBorderTop": true,
+              "collapsable": null
+             }
+            ]
+           },
+           "explanationDataDisplayPosition": "PRIMARY_LINE",
+           "displayPriceStyle": "TOTAL_ONLY",
+           "loggingMetadata": {
+            "__typename": "StructuredDisplayPriceLoggingMetadata",
+            "loggingCorrelationId": "481dbbad-e30e-4ac3-8b3a-2ceb7ab836de"
+           }
+          },
+          "badges": [],
+          "title": null,
+          "subtitle": null,
+          "nameLocalized": {
+           "__typename": "UGCText",
+           "localizedStringWithTranslationPreference": "Cozy 2 Bedroom Near Uptown, Dining & Fun"
+          },
+          "propertyId": null,
+          "structuredContent": {
+           "__typename": "ExploreStructuredContent",
+           "distance": [],
+           "mapCategoryInfo": null,
+           "mapPrimaryLine": [],
+           "mapSecondaryLine": [
+            {
+             "__typename": "MainSectionMessage",
+             "body": "20–25 Sept",
+             "bodyA11yLabel": null,
+             "bodyType": null,
+             "fontWeight": null,
+             "headline": null,
+             "type": "DATE"
+            }
+           ],
+           "primaryLine": [
+            {
+             "__typename": "MainSectionMessage",
+             "body": "12,963 kilometres away",
+             "bodyA11yLabel": null,
+             "bodyType": null,
+             "fontWeight": null,
+             "headline": null,
+             "type": "DISTANCE"
+            }
+           ],
+           "secondaryLine": [
+            {
+             "__typename": "MainSectionMessage",
+             "body": "20–25 Sept",
+             "bodyA11yLabel": null,
+             "bodyType": null,
+             "fontWeight": null,
+             "headline": null,
+             "type": "DATE"
+            }
+           ],
+           "tertiaryLine": [],
+           "reviewSnippet": null,
+           "explanation": []
+          },
+          "demandStayListing": {
+           "__typename": "DemandStayListing",
+           "id": "RGVtYW5kU3RheUxpc3Rpbmc6MTc1NzIwNDEyNDEwOTk3MzIxNg==",
+           "location": {
+            "__typename": "DemandStayListingLocation",
+            "coordinate": {
+             "__typename": "Coordinate",
+             "latitude": 35.1507,
+             "longitude": -80.8986
+            }
+           },
+           "description": {
+            "__typename": "DemandStayListingDescription",
+            "name": {
+             "__typename": "UGCText",
+             "localizedStringWithTranslationPreference": "Cozy 2 Bedroom Near Uptown, Dining & Fun"
+            }
+           },
+           "wishlistItems": [],
+           "nameLocale": "en-IN"
+          }
+         },
+         {
+          "__typename": "StaySearchResult",
+          "avgRatingA11yLabel": "New place to stay",
+          "avgRatingLocalized": "New",
+          "listingParamOverrides": {
+           "__typename": "ExploreListingParamOverrides",
+           "adults": 2,
+           "categoryTag": null,
+           "causeId": null,
+           "checkin": "2026-10-11",
+           "checkout": "2026-10-16",
+           "children": 0,
+           "distanceInKm": null,
+           "highlightType": null,
+           "infants": 0,
+           "pets": 0,
+           "photoId": null,
+           "relaxedAmenityIds": [],
+           "splitStaysLocationPrecisions": [],
+           "splitStaysLocationsAcpIds": [],
+           "splitStaysUuid": null,
+           "amenities": null
+          },
+          "structuredDisplayPrice": {
+           "__typename": "StructuredDisplayPrice",
+           "primaryLine": {
+            "__typename": "DiscountedDisplayPriceLine",
+            "accessibilityLabel": "$1,034 USD for 5 nights, originally $1,242 USD",
+            "discountedPrice": "$1,034 USD",
+            "originalPrice": "$1,242 USD",
+            "qualifier": "for 5 nights",
+            "concatQualifierLeft": false,
+            "trailing": null
+           },
+           "secondaryLine": null,
+           "explanationData": {
+            "__typename": "DisplayPriceExplanationData",
+            "title": "Price details",
+            "subtitle": null,
+            "priceDetails": [
+             {
+              "__typename": "DisplayPriceExplanationLineGroup",
+              "items": [
+               {
+                "__typename": "DefaultExplanationLineItem",
+                "description": "5 nights x $248.40 USD",
+                "priceString": "$1,242.00 USD",
+                "explanationData": null
+               },
+               {
+                "__typename": "DiscountedExplanationLineItem",
+                "description": "Special offer",
+                "priceString": "-$208.40 USD",
+                "originalPriceString": null,
+                "explanationData": null
+               }
+              ],
+              "renderBorderTop": false,
+              "collapsable": null
+             },
+             {
+              "__typename": "DisplayPriceExplanationLineGroup",
+              "items": [
+               {
+                "__typename": "HighlightExplanationLineItem",
+                "description": "Price after discount",
+                "priceString": "$1,033.60 USD",
+                "explanationData": null,
+                "originalPriceString": null,
+                "accessibilityLabel": "$1,033.60 USD total before taxes"
+               }
+              ],
+              "renderBorderTop": true,
+              "collapsable": null
+             }
+            ]
+           },
+           "explanationDataDisplayPosition": "PRIMARY_LINE",
+           "displayPriceStyle": "TOTAL_ONLY",
+           "loggingMetadata": {
+            "__typename": "StructuredDisplayPriceLoggingMetadata",
+            "loggingCorrelationId": "df628366-905d-43b6-99b1-4484489d3e00"
+           }
+          },
+          "badges": [],
+          "title": null,
+          "subtitle": null,
+          "nameLocalized": {
+           "__typename": "UGCText",
+           "localizedStringWithTranslationPreference": "3BR Charlotte Skyline Retreat | Private Rooftop"
+          },
+          "propertyId": null,
+          "structuredContent": {
+           "__typename": "ExploreStructuredContent",
+           "distance": [],
+           "mapCategoryInfo": null,
+           "mapPrimaryLine": [],
+           "mapSecondaryLine": [
+            {
+             "__typename": "MainSectionMessage",
+             "body": "11–16 Oct",
+             "bodyA11yLabel": null,
+             "bodyType": null,
+             "fontWeight": null,
+             "headline": null,
+             "type": "DATE"
+            }
+           ],
+           "primaryLine": [
+            {
+             "__typename": "MainSectionMessage",
+             "body": "12,955 kilometres away",
+             "bodyA11yLabel": null,
+             "bodyType": null,
+             "fontWeight": null,
+             "headline": null,
+             "type": "DISTANCE"
+            }
+           ],
+           "secondaryLine": [
+            {
+             "__typename": "MainSectionMessage",
+             "body": "11–16 Oct",
+             "bodyA11yLabel": null,
+             "bodyType": null,
+             "fontWeight": null,
+             "headline": null,
+             "type": "DATE"
+            }
+           ],
+           "tertiaryLine": [],
+           "reviewSnippet": null,
+           "explanation": []
+          },
+          "demandStayListing": {
+           "__typename": "DemandStayListing",
+           "id": "RGVtYW5kU3RheUxpc3Rpbmc6MTc3MjgzMTczODI5MTU4MzA3NQ==",
+           "location": {
+            "__typename": "DemandStayListingLocation",
+            "coordinate": {
+             "__typename": "Coordinate",
+             "latitude": 35.2263,
+             "longitude": -80.87321
+            }
+           },
+           "description": {
+            "__typename": "DemandStayListingDescription",
+            "name": {
+             "__typename": "UGCText",
+             "localizedStringWithTranslationPreference": "3BR Charlotte Skyline Retreat | Private Rooftop"
+            }
+           },
+           "wishlistItems": [],
+           "nameLocale": "en-IN"
+          }
+         },
+         {
+          "__typename": "StaySearchResult",
+          "avgRatingA11yLabel": "5.0 out of 5 average rating",
+          "avgRatingLocalized": "5.0",
+          "listingParamOverrides": {
+           "__typename": "ExploreListingParamOverrides",
+           "adults": 2,
+           "categoryTag": null,
+           "causeId": null,
+           "checkin": "2026-09-27",
+           "checkout": "2026-10-02",
+           "children": 0,
+           "distanceInKm": null,
+           "highlightType": null,
+           "infants": 0,
+           "pets": 0,
+           "photoId": null,
+           "relaxedAmenityIds": [],
+           "splitStaysLocationPrecisions": [],
+           "splitStaysLocationsAcpIds": [],
+           "splitStaysUuid": null,
+           "amenities": null
+          },
+          "structuredDisplayPrice": {
+           "__typename": "StructuredDisplayPrice",
+           "primaryLine": {
+            "__typename": "DiscountedDisplayPriceLine",
+            "accessibilityLabel": "$672 USD for 5 nights, originally $1,127 USD",
+            "discountedPrice": "$672 USD",
+            "originalPrice": "$1,127 USD",
+            "qualifier": "for 5 nights",
+            "concatQualifierLeft": false,
+            "trailing": null
+           },
+           "secondaryLine": null,
+           "explanationData": {
+            "__typename": "DisplayPriceExplanationData",
+            "title": "Price details",
+            "subtitle": null,
+            "priceDetails": [
+             {
+              "__typename": "DisplayPriceExplanationLineGroup",
+              "items": [
+               {
+                "__typename": "DiscountedExplanationLineItem",
+                "description": "5 nights x $134.40 USD",
+                "priceString": "$672.00 USD",
+                "originalPriceString": "$1,127.00 USD",
+                "explanationData": null
+               }
+              ],
+              "renderBorderTop": false,
+              "collapsable": null
+             },
+             {
+              "__typename": "DisplayPriceExplanationDisclaimer",
+              "content": "Medina recently lowered the price for these dates (from the average rate for the past 60 nights)."
+             }
+            ]
+           },
+           "explanationDataDisplayPosition": "PRIMARY_LINE",
+           "displayPriceStyle": "TOTAL_ONLY",
+           "loggingMetadata": {
+            "__typename": "StructuredDisplayPriceLoggingMetadata",
+            "loggingCorrelationId": "227bd441-26fa-40b8-924f-b7505b9fbe0e"
+           }
+          },
+          "badges": [
+           {
+            "__typename": "ExploreFormattedBadge",
+            "icon": null,
+            "loggingContext": {
+             "__typename": "ExploreFormattedBadgeLoggingContext",
+             "badgeType": "GUEST_FAVORITE"
+            },
+            "style": "LOUD_ROUNDED_PILL",
+            "text": "Guest favourite",
+            "textAccessibilityLabel": "Guest favourite",
+            "textColor": "#000000"
+           }
+          ],
+          "title": null,
+          "subtitle": null,
+          "nameLocalized": {
+           "__typename": "UGCText",
+           "localizedStringWithTranslationPreference": "Warm & Welcoming\nThe Sloan Corner House\n\nSloan "
+          },
+          "propertyId": null,
+          "structuredContent": {
+           "__typename": "ExploreStructuredContent",
+           "distance": [],
+           "mapCategoryInfo": null,
+           "mapPrimaryLine": [],
+           "mapSecondaryLine": [
+            {
+             "__typename": "MainSectionMessage",
+             "body": "27 Sept – 2 Oct",
+             "bodyA11yLabel": null,
+             "bodyType": null,
+             "fontWeight": null,
+             "headline": null,
+             "type": "DATE"
+            }
+           ],
+           "primaryLine": [
+            {
+             "__typename": "MainSectionMessage",
+             "body": "12,955 kilometres away",
+             "bodyA11yLabel": null,
+             "bodyType": null,
+             "fontWeight": null,
+             "headline": null,
+             "type": "DISTANCE"
+            }
+           ],
+           "secondaryLine": [
+            {
+             "__typename": "MainSectionMessage",
+             "body": "27 Sept – 2 Oct",
+             "bodyA11yLabel": null,
+             "bodyType": null,
+             "fontWeight": null,
+             "headline": null,
+             "type": "DATE"
+            }
+           ],
+           "tertiaryLine": [],
+           "reviewSnippet": null,
+           "explanation": []
+          },
+          "demandStayListing": {
+           "__typename": "DemandStayListing",
+           "id": "RGVtYW5kU3RheUxpc3Rpbmc6MTczNjQ4ODYxMTEzMzkyNjczOA==",
+           "location": {
+            "__typename": "DemandStayListingLocation",
+            "coordinate": {
+             "__typename": "Coordinate",
+             "latitude": 35.2481,
+             "longitude": -80.9219
+            }
+           },
+           "description": {
+            "__typename": "DemandStayListingDescription",
+            "name": {
+             "__typename": "UGCText",
+             "localizedStringWithTranslationPreference": "Warm & Welcoming\nThe Sloan Corner House\n\nSloan "
+            }
+           },
+           "wishlistItems": [],
+           "nameLocale": "en"
+          }
+         }
+        ],
+        "paginationInfo": {
+         "__typename": "StaysSearchPaginationInfo",
+         "pageCursors": [
+          "eyJzZWN0aW9uX29mZnNldCI6MCwiaXRlbXNfb2Zmc2V0IjowLCJ2ZXJzaW9uIjoxfQ==",
+          "eyJzZWN0aW9uX29mZnNldCI6MCwiaXRlbXNfb2Zmc2V0IjoxOCwidmVyc2lvbiI6MX0=",
+          "eyJzZWN0aW9uX29mZnNldCI6MCwiaXRlbXNfb2Zmc2V0IjozNiwidmVyc2lvbiI6MX0="
+         ]
+        }
+       }
+      }
+     }
+    }
+   }
+  ]
+ ]
+}
