@@ -38,39 +38,77 @@ bot replies with their Telegram ID so you can add them.
 
 ## Install on a Raspberry Pi
 
-1. Create a bot with [@BotFather](https://t.me/BotFather) and copy the token.
-2. Install. This downloads the latest release binary and sets up a systemd service:
+Works on Raspberry Pi OS 64-bit (Pi 3/4/5). All commands run on the Pi.
+
+1. **Create the bot.** In Telegram, message [@BotFather](https://t.me/BotFather),
+   send `/newbot`, and copy the token it gives you (`123456:ABC...`).
+
+2. **Install the build tools** (one time, about 2 minutes):
    ```bash
-   curl -fsSL https://raw.githubusercontent.com/claude-bot-nikitos/airbnb-notifier/main/deploy/install.sh | sudo sh
+   sudo apt update && sudo apt install -y git build-essential curl
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+   source "$HOME/.cargo/env"
    ```
-3. Configure and start:
+
+3. **Get the code and build it** (about 3–5 minutes on a Pi 5). The repository
+   is private, so clone it with your GitHub login: SSH key, `gh auth login`, or
+   a personal access token as the password.
    ```bash
+   git clone https://github.com/claude-bot-nikitos/airbnb-notifier.git
+   cd airbnb-notifier
+   cargo build --release
+   ```
+
+4. **Install it as a service.** This copies the binary to `/opt/airbnb-notifier`,
+   adds the `airbnb-notifier` command, and sets up systemd:
+   ```bash
+   sudo BINARY=target/release/airbnb-notifier sh deploy/install.sh
    sudo airbnb-notifier init --token 123456:ABC...
    sudo systemctl enable --now airbnb-notifier
    ```
-4. Send `/start` to your bot. It replies with your Telegram ID. Allow yourself:
+
+5. **Allow yourself.** Send `/start` to your bot. It replies with your Telegram
+   ID. Then:
    ```bash
    sudo airbnb-notifier user add 123456789
    ```
    You don't need to restart; the bot re-reads the config on every message.
-5. Send it an Airbnb search link.
 
-To update, run the same `install.sh` command again. It replaces the binary and
-restarts the service. Logs: `journalctl -u airbnb-notifier -f`.
+6. **Check that Airbnb is reachable from your network** (recommended):
+   ```bash
+   sudo airbnb-notifier test 'https://www.airbnb.com/s/Lisbon--Portugal/homes?adults=2' --pages 2
+   ```
+   It should print about 36 listings with names and prices.
 
-Everything lives in `/opt/airbnb-notifier`: the binary, `config.toml` (mode
-`0600`), and `searches.json`.
+7. **Use it.** On Airbnb, set up a search with your filters, copy the link of
+   the results page, and send it to the bot.
 
-### Build from source instead
+Useful commands:
 
 ```bash
-cargo build --release
-sudo BINARY=target/release/airbnb-notifier sh deploy/install.sh
+journalctl -u airbnb-notifier -f          # live logs
+sudo systemctl restart airbnb-notifier    # restart
+sudo airbnb-notifier user list            # who can use the bot
 ```
 
-The Pi 5 builds this natively in a few minutes. Release binaries for
-`aarch64` (64-bit Pi OS), `armv7` (32-bit Pi OS), and `x86_64` come from
-`.github/workflows/release.yml`. Push a `v*` tag to publish them.
+**Updating:**
+```bash
+cd ~/airbnb-notifier && git pull && cargo build --release
+sudo BINARY=target/release/airbnb-notifier sh deploy/install.sh   # restarts the service
+```
+
+Everything the bot keeps lives in `/opt/airbnb-notifier`: the binary,
+`config.toml` (mode `0600`, holds the token), and `searches.json`.
+
+### Prebuilt binaries
+
+`.github/workflows/release.yml` builds static binaries for `aarch64` (64-bit
+Pi OS), `armv7` (32-bit Pi OS), and `x86_64` when you push a `v*` tag. If the
+repository is public, `install.sh` without `BINARY` downloads the latest release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/claude-bot-nikitos/airbnb-notifier/master/deploy/install.sh | sudo sh
+```
 
 ## CLI
 

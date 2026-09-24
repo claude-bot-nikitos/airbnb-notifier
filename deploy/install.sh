@@ -1,7 +1,8 @@
 #!/bin/sh
 # Installs or updates airbnb-notifier as a systemd service.
-#   curl -fsSL https://raw.githubusercontent.com/claude-bot-nikitos/airbnb-notifier/main/deploy/install.sh | sudo sh
-# Set BINARY=/path/to/airbnb-notifier to install a locally built binary instead of a release.
+#   curl -fsSL https://raw.githubusercontent.com/claude-bot-nikitos/airbnb-notifier/master/deploy/install.sh | sudo sh
+# Set BINARY=/path/to/airbnb-notifier to install a locally built binary instead of a
+# release (needed while the repository is private).
 set -eu
 
 REPO="claude-bot-nikitos/airbnb-notifier"
