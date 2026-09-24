@@ -1,8 +1,8 @@
 #!/bin/sh
 # Installs or updates airbnb-notifier as a systemd service.
 #   curl -fsSL https://raw.githubusercontent.com/claude-bot-nikitos/airbnb-notifier/master/deploy/install.sh | sudo sh
-# Set BINARY=/path/to/airbnb-notifier to install a locally built binary instead of a
-# release (needed while the repository is private).
+# Uses, in order: $BINARY, an airbnb-notifier-<target> file next to this script
+# (the release bundle), or a download of the latest GitHub release.
 set -eu
 
 REPO="claude-bot-nikitos/airbnb-notifier"
@@ -22,8 +22,15 @@ case "$(uname -m)" in
     *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 
+# A binary shipped next to this script (release bundle) is used if present.
+HERE="$(cd "$(dirname "$0")" && pwd)"
+if [ -z "${BINARY:-}" ] && [ -f "$HERE/airbnb-notifier-$TARGET" ]; then
+    BINARY="$HERE/airbnb-notifier-$TARGET"
+fi
+
 mkdir -p "$DIR"
 if [ -n "${BINARY:-}" ]; then
+    echo "Installing $BINARY"
     cp "$BINARY" "$BIN.new"
 else
     URL="https://github.com/$REPO/releases/latest/download/airbnb-notifier-$TARGET"

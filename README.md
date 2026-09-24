@@ -100,6 +100,19 @@ sudo BINARY=target/release/airbnb-notifier sh deploy/install.sh   # restarts the
 Everything the bot keeps lives in `/opt/airbnb-notifier`: the binary,
 `config.toml` (mode `0600`, holds the token), and `searches.json`.
 
+### Prebuilt bundle (no Rust needed on the Pi)
+
+A bundle holds `install.sh` plus static binaries for 64-bit (`aarch64`) and
+32-bit (`armv7`) Pi OS. The installer picks the right binary itself:
+
+```bash
+tar xzf airbnb-notifier-rpi.tar.gz && cd airbnb-notifier-rpi
+sudo ./install.sh
+```
+
+Build the binaries yourself with the cross-compile setup from
+[Development](#development) (`cargo build --release --target ...`).
+
 ### Prebuilt binaries
 
 `.github/workflows/release.yml` builds static binaries for `aarch64` (64-bit
