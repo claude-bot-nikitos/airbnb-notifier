@@ -113,7 +113,7 @@ fn test_command_prints_listings() {
     );
     assert!(out.contains("Search URL: https://www.airbnb.com/s/Porto--Portugal/homes?adults=2"));
     assert!(out.contains("Default name: Porto, Portugal"));
-    assert!(out.contains("Found 3 listings"));
+    assert!(out.contains("Found 3 listings"), "{out}");
     assert!(
         out.contains("Flat 13  |  €113 for 5 nights  |  4.9"),
         "{out}"
@@ -121,6 +121,35 @@ fn test_command_prints_listings() {
 
     // Default is a single page.
     assert!(ok(&cfg, &["test", "https://www.airbnb.com/s/x/homes"]).contains("Found 2 listings"));
+
+    // With dates: other-date padding is labelled, --verify checks calendars.
+    airbnb.other_dates.lock().unwrap().push(99);
+    airbnb.booked.lock().unwrap().insert(12);
+    let dated = "https://www.airbnb.com/s/x/homes?checkin=2026-11-10&checkout=2026-11-15";
+    let out = ok(&cfg, &["test", dated, "--pages", "5", "--verify"]);
+    assert!(out.contains("Dates: 10–15 Nov 2026 · 5 nights"), "{out}");
+    assert!(out.contains("Found 4 listings, 3 for your dates:"), "{out}");
+    assert!(out.contains("11  [FREE]"), "{out}");
+    assert!(
+        out.contains("12  [BOOKED (no check-in on 2026-11-10)]"),
+        "{out}"
+    );
+    assert!(
+        out.contains("99  [OTHER DATES 2026-12-01..2026-12-06]"),
+        "{out}"
+    );
+    *airbnb.calendar_down.lock().unwrap() = true;
+    let out = ok(&cfg, &["test", dated, "--verify"]);
+    assert!(out.contains("11  [UNKNOWN (calendar: HTTP 500)]"), "{out}");
+    *airbnb.calendar_down.lock().unwrap() = false;
+    let out = ok(&cfg, &["test", dated]);
+    assert!(out.contains("(more pages not read)"), "{out}");
+    assert!(out.contains("11  [your dates]"), "{out}");
+    let out = ok(
+        &cfg,
+        &["test", "https://www.airbnb.com/s/x/homes", "--pages", "5"],
+    );
+    assert!(out.contains("Dates: none"), "{out}");
 
     *airbnb.fail_with.lock().unwrap() = Some(403);
     assert!(fails(&cfg, &["test", "https://www.airbnb.com/s/x/homes"]).contains("HTTP 403"));

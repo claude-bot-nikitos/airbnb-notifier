@@ -16,7 +16,13 @@ use crate::util::{esc, now_ts};
 /// The subset of the Bot API we use, so handlers can be tested with a mock.
 pub trait Api: Send + Sync {
     fn send(&self, chat_id: i64, html: &str, kb: Option<&Keyboard>) -> Result<()>;
-    fn send_photo(&self, chat_id: i64, photo_url: &str, caption_html: &str) -> Result<()>;
+    fn send_photo(
+        &self,
+        chat_id: i64,
+        photo_url: &str,
+        caption_html: &str,
+        kb: Option<&Keyboard>,
+    ) -> Result<()>;
     fn edit(&self, chat_id: i64, message_id: i64, html: &str, kb: Option<&Keyboard>) -> Result<()>;
     fn answer_callback(&self, id: &str, text: &str) -> Result<()>;
 }
@@ -25,8 +31,14 @@ impl Api for Telegram {
     fn send(&self, chat_id: i64, html: &str, kb: Option<&Keyboard>) -> Result<()> {
         Telegram::send(self, chat_id, html, kb)
     }
-    fn send_photo(&self, chat_id: i64, photo_url: &str, caption_html: &str) -> Result<()> {
-        Telegram::send_photo(self, chat_id, photo_url, caption_html)
+    fn send_photo(
+        &self,
+        chat_id: i64,
+        photo_url: &str,
+        caption_html: &str,
+        kb: Option<&Keyboard>,
+    ) -> Result<()> {
+        Telegram::send_photo(self, chat_id, photo_url, caption_html, kb)
     }
     fn edit(&self, chat_id: i64, message_id: i64, html: &str, kb: Option<&Keyboard>) -> Result<()> {
         Telegram::edit(self, chat_id, message_id, html, kb)
@@ -39,9 +51,11 @@ impl Api for Telegram {
 pub const HELP: &str = "<b>Airbnb notifier</b>\n\n\
 1. Open Airbnb, search and set all the filters you want (dates, guests, price, map area…).\n\
 2. Copy/share the link of the results page and send it to me.\n\
-3. I'll remember the current listings and message you whenever a <b>new</b> one shows up.\n\n\
+3. I'll remember the current listings and message you whenever a <b>new</b> one shows up \
+for your dates, after checking its calendar — or when a place that was booked frees up again.\n\n\
 /list — your searches with Pause / Rename / Delete buttons\n\
 /check — check all your searches now\n\
+/every <i>id</i> <i>minutes</i> — how often to check a search (e.g. /every 1 5)\n\
 /rename <i>id</i> <i>name</i>, /pause <i>id</i>, /resume <i>id</i>, /delete <i>id</i>\n\n\
 You can have as many searches as you like.";
 
@@ -179,6 +193,21 @@ impl<A: Api> Bot<A> {
                         Ok(id) => self.ask_rename(chat_id, id),
                         Err(_) => self.say(chat_id, "Usage: /rename <i>id</i> <i>new name</i>"),
                     }
+                }
+                "every" => {
+                    let mut parts = args.split_whitespace();
+                    let id = parts
+                        .next()
+                        .and_then(|s| s.trim_start_matches('#').parse::<u32>().ok());
+                    let minutes = parts.next();
+                    let msg = match (id, minutes) {
+                        (Some(id), Some(m)) => self.set_interval(chat_id, id, m),
+                        _ => format!(
+                            "Usage: /every <i>id</i> <i>minutes</i> (at least {MIN_INTERVAL_MINUTES}), \
+                             or /every <i>id</i> default"
+                        ),
+                    };
+                    self.say(chat_id, &msg);
                 }
                 _ => self.say(chat_id, HELP),
             }
@@ -321,6 +350,31 @@ impl<A: Api> Bot<A> {
         format!("✏️ Search <b>#{id}</b> is now called <b>{}</b>", esc(&name))
     }
 
+    fn set_interval(&self, chat_id: i64, id: u32, minutes: &str) -> String {
+        let value = match minutes {
+            "default" => None,
+            m => match m.parse::<u64>() {
+                Ok(m) if (MIN_INTERVAL_MINUTES..=1440).contains(&m) => Some(m),
+                _ => {
+                    return format!(
+                        "Minutes must be a number from {MIN_INTERVAL_MINUTES} to 1440, or \"default\"."
+                    );
+                }
+            },
+        };
+        let mut store = self.store.lock().unwrap();
+        let Some(s) = store.owned_mut(chat_id, id) else {
+            return format!("No search #{id}. See /list");
+        };
+        s.interval_minutes = value;
+        let name = esc(&s.name);
+        self.save(&store);
+        match value {
+            Some(m) => format!("⏱ <b>#{id} {name}</b> will be checked every {m} min."),
+            None => format!("⏱ <b>#{id} {name}</b> uses the default interval again."),
+        }
+    }
+
     fn ask_rename(&mut self, chat_id: i64, id: u32) {
         let exists = self.store.lock().unwrap().owned_mut(chat_id, id).is_some();
         if exists {
@@ -415,6 +469,9 @@ fn ago(ts: i64) -> String {
     }
 }
 
+/// Shortest per-search interval; faster checks risk getting blocked.
+pub const MIN_INTERVAL_MINUTES: u64 = 2;
+
 pub fn card(s: &Search) -> String {
     let status = if s.paused {
         "⏸ paused"
@@ -423,14 +480,21 @@ pub fn card(s: &Search) -> String {
     } else {
         "▶️ active"
     };
+    let every = match s.interval_minutes {
+        Some(m) => format!("every {m} min"),
+        None => "default interval".into(),
+    };
     let mut text = format!(
-        "<b>#{} {}</b> — {status}\n<a href=\"{}\">Open search</a> · {} listings known · checked {}",
+        "<b>#{} {}</b> — {status}\n<a href=\"{}\">Open search</a> · {} listings known · {every} · checked {}",
         s.id,
         esc(&s.name),
         esc(&s.url),
         s.seen.len(),
         ago(s.last_check)
     );
+    if let Some(stay) = crate::airbnb::search_dates(&s.url) {
+        text.push_str(&format!("\n📅 {}", esc(&crate::airbnb::stay_label(&stay))));
+    }
     if let Some(err) = &s.last_error {
         text.push_str(&format!("\n⚠️ Last error: {}", esc(err)));
     }
@@ -460,6 +524,8 @@ pub mod tests {
         pub sent: Mutex<Vec<(i64, String)>>,
         pub photos: Mutex<Vec<(i64, String, String)>>,
         pub edits: Mutex<Vec<(i64, i64, String)>>,
+        /// Keyboards attached to sent messages and photos.
+        pub keyboards: Mutex<Vec<Keyboard>>,
         pub fail_photos: bool,
         /// Every call fails, like Telegram being down.
         pub fail_all: bool,
@@ -475,14 +541,26 @@ pub mod tests {
     }
 
     impl Api for MockApi {
-        fn send(&self, chat_id: i64, html: &str, _kb: Option<&Keyboard>) -> Result<()> {
+        fn send(&self, chat_id: i64, html: &str, kb: Option<&Keyboard>) -> Result<()> {
             self.check()?;
+            if let Some(kb) = kb {
+                self.keyboards.lock().unwrap().push(kb.clone());
+            }
             self.sent.lock().unwrap().push((chat_id, html.to_string()));
             Ok(())
         }
-        fn send_photo(&self, chat_id: i64, photo: &str, caption: &str) -> Result<()> {
+        fn send_photo(
+            &self,
+            chat_id: i64,
+            photo: &str,
+            caption: &str,
+            kb: Option<&Keyboard>,
+        ) -> Result<()> {
             if self.fail_photos || self.fail_all {
                 return Err(anyhow::anyhow!("bad photo"));
+            }
+            if let Some(kb) = kb {
+                self.keyboards.lock().unwrap().push(kb.clone());
             }
             self.photos
                 .lock()
@@ -774,7 +852,19 @@ pub mod tests {
             last_check: 0,
             last_error: None,
             failures: 0,
+            gone: Default::default(),
+            interval_minutes: None,
+            schema: crate::store::SCHEMA,
         };
+        let c = card(&s);
+        assert!(c.contains("default interval"));
+        assert!(!c.contains("📅"), "no dates in this search");
+        s.interval_minutes = Some(5);
+        s.url = "https://www.airbnb.com/s/x/homes?checkin=2026-12-30&checkout=2027-01-02".into();
+        let c = card(&s);
+        assert!(c.contains("every 5 min"));
+        assert!(c.contains("📅 30 Dec 2026 – 2 Jan 2027 · 3 nights"), "{c}");
+        s.url = "https://www.airbnb.com/s/x/homes?a=1&b=2".into();
         let c = card(&s);
         assert!(c.contains("#3 A&amp;B"));
         assert!(c.contains("loading"));
@@ -798,5 +888,32 @@ pub mod tests {
         s.paused = true;
         assert!(card(&s).contains("paused"));
         assert_eq!(card_keyboard(&s)[0][0].1, "r:3");
+    }
+
+    #[test]
+    fn every_command() {
+        let (mut bot, _rx) = setup("every");
+        bot.handle(msg("https://www.airbnb.com/s/Rome/homes", 7));
+        for (cmd, expect) in [
+            ("/every", "Usage: /every"),
+            ("/every 1", "Usage: /every"),
+            ("/every x 5", "Usage: /every"),
+            ("/every 1 1", "from 2 to 1440"),
+            ("/every 1 soon", "from 2 to 1440"),
+            ("/every 1 2000", "from 2 to 1440"),
+            ("/every 9 5", "No search #9"),
+            ("/every #1 3", "checked every 3 min"),
+        ] {
+            bot.handle(msg(cmd, 7));
+            assert!(
+                last_sent(&bot).contains(expect),
+                "{cmd} → {}",
+                last_sent(&bot)
+            );
+        }
+        assert_eq!(bot.store.lock().unwrap().all()[0].interval_minutes, Some(3));
+        bot.handle(msg("/every 1 default", 7));
+        assert!(last_sent(&bot).contains("default interval again"));
+        assert_eq!(bot.store.lock().unwrap().all()[0].interval_minutes, None);
     }
 }

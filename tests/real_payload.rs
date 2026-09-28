@@ -95,3 +95,32 @@ fn minified_html_attributes_in_any_order() {
     );
     assert_eq!(parse_page(&html).unwrap().listings.len(), 4);
 }
+
+#[test]
+fn reads_the_dates_each_result_is_offered_for() {
+    // In this capture Airbnb offered several listings for different dates:
+    // exactly the "available for similar dates" padding the bot must ignore.
+    let page = parse_page(&common::wrap_state(&fixture())).unwrap();
+    let dates: Vec<(String, String)> = page
+        .listings
+        .iter()
+        .map(|l| l.dates.clone().unwrap())
+        .collect();
+    let pair = |a: &str, b: &str| (a.to_string(), b.to_string());
+    assert_eq!(
+        dates,
+        vec![
+            pair("2026-09-20", "2026-09-25"),
+            pair("2026-09-20", "2026-09-25"),
+            pair("2026-10-11", "2026-10-16"),
+            pair("2026-09-27", "2026-10-02"),
+        ]
+    );
+    let wanted = pair("2026-09-20", "2026-09-25");
+    let exact = page
+        .listings
+        .iter()
+        .filter(|l| l.matches_dates(Some(&wanted)))
+        .count();
+    assert_eq!(exact, 2, "only two are for the searched dates");
+}

@@ -35,7 +35,45 @@ pub struct Listing {
     pub price: String,
     pub rating: String,
     pub picture: Option<String>,
+    /// The (check-in, check-out) this result is offered for. When Airbnb has
+    /// few exact matches it pads results with places free on *other* dates
+    /// ("available for similar dates"); those carry different dates here.
+    pub dates: Option<(String, String)>,
 }
+
+impl Listing {
+    /// Whether this result is for the searched dates (always true when the
+    /// search has no fixed dates or the result carries none).
+    pub fn matches_dates(&self, wanted: Option<&(String, String)>) -> bool {
+        match (wanted, &self.dates) {
+            (Some(w), Some(d)) => w == d,
+            _ => true,
+        }
+    }
+}
+
+/// All listings of a search, and whether every result page was read. Only a
+/// complete scan proves that a listing is gone.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Scan {
+    pub listings: Vec<Listing>,
+    pub complete: bool,
+}
+
+/// Calendar check of one listing for the searched dates.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Verdict {
+    Available,
+    Unavailable(String),
+    /// The check itself failed; the listing may or may not be free.
+    Unknown(String),
+}
+
+/// Public web key of airbnb.com, used if none is found in a fetched page.
+const FALLBACK_API_KEY: &str = "d306zoyjsyarp7ifhu67rjxn52tv0t20";
+/// Persisted query id of the listing availability calendar.
+const CALENDAR_QUERY_HASH: &str =
+    "8f08e03c7bd16fcad3c92a3592c19a8b559a0d0855a84028d1163d4733ed9ade";
 
 #[derive(Debug, Default)]
 pub struct Page {
@@ -68,6 +106,8 @@ pub struct Fetcher {
     origin: Option<Url>,
     /// Base pause between result pages; a random 0–2s is added.
     page_delay: Duration,
+    /// Web API key seen in the latest search page.
+    api_key: std::sync::Mutex<Option<String>>,
 }
 
 impl Fetcher {
@@ -93,6 +133,7 @@ impl Fetcher {
             current: AtomicUsize::new(0),
             origin: None,
             page_delay: Duration::from_millis(1500),
+            api_key: std::sync::Mutex::new(None),
         })
     }
 
@@ -191,14 +232,18 @@ impl Fetcher {
             }
             Ok((u, html))
         })?;
+        if let Some(key) = find_api_key(&html) {
+            *self.api_key.lock().unwrap() = Some(key);
+        }
         parse_page(&html)
     }
 
     /// Fetches up to `max_pages` pages and returns all unique listings.
-    pub fn fetch_all(&self, search_url: &str, max_pages: u32) -> Result<Vec<Listing>> {
+    pub fn fetch_all(&self, search_url: &str, max_pages: u32) -> Result<Scan> {
         let mut seen = HashSet::new();
         let mut out = Vec::new();
         let mut cursor: Option<String> = None;
+        let mut complete = false;
         for page_no in 0..max_pages {
             if page_no > 0 {
                 self.pause();
@@ -215,11 +260,211 @@ impl Fetcher {
             // (protects against cursors that loop).
             match page.cursor_after(cursor.as_deref()) {
                 Some(c) if out.len() > before && Some(&c) != cursor.as_ref() => cursor = Some(c),
-                _ => break,
+                _ => {
+                    complete = true;
+                    break;
+                }
             }
         }
-        Ok(out)
+        Ok(Scan {
+            listings: out,
+            complete,
+        })
     }
+
+    /// Checks the listing's live calendar for the searched stay. Search
+    /// results can lag behind bookings; the calendar is what booking uses.
+    pub fn verify(&self, search_url: &str, listing_id: u64, stay: &(String, String)) -> Verdict {
+        match self.fetch_calendar(search_url, listing_id, &stay.0) {
+            Ok(json) => judge_calendar(&json, &stay.0, &stay.1),
+            Err(e) => Verdict::Unknown(format!("{e:#}")),
+        }
+    }
+
+    fn fetch_calendar(&self, search_url: &str, listing_id: u64, checkin: &str) -> Result<Value> {
+        let (year, month, _) = parse_date(checkin).ok_or_else(|| anyhow!("bad date"))?;
+        let mut u = match &self.origin {
+            Some(o) => o.clone(),
+            None => {
+                let s = Url::parse(search_url)?;
+                Url::parse(&format!(
+                    "https://{}",
+                    s.host_str().unwrap_or("www.airbnb.com")
+                ))?
+            }
+        };
+        u.set_path(&format!(
+            "/api/v3/PdpAvailabilityCalendar/{CALENDAR_QUERY_HASH}"
+        ));
+        let variables = serde_json::json!({"request": {
+            "count": 2, "listingId": listing_id.to_string(), "month": month, "year": year
+        }});
+        let extensions = serde_json::json!({"persistedQuery": {
+            "version": 1, "sha256Hash": CALENDAR_QUERY_HASH
+        }});
+        u.query_pairs_mut()
+            .append_pair("operationName", "PdpAvailabilityCalendar")
+            .append_pair("locale", "en")
+            .append_pair("currency", "USD")
+            .append_pair("variables", &variables.to_string())
+            .append_pair("extensions", &extensions.to_string());
+        let key = self
+            .api_key
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| FALLBACK_API_KEY.to_string());
+        self.with_rotation(|agent| {
+            let resp = agent
+                .get(u.as_str())
+                .set("Accept", "application/json")
+                .set("X-Airbnb-Api-Key", &key)
+                .call()
+                .map_err(|e| match e {
+                    ureq::Error::Status(code, _) => anyhow!("calendar: HTTP {code}"),
+                    ureq::Error::Transport(t) => anyhow!("calendar: network error: {t}"),
+                })?;
+            Ok(resp.into_json::<Value>()?)
+        })
+    }
+}
+
+/// Decides from a PdpAvailabilityCalendar response whether the stay
+/// `checkin`..`checkout` (YYYY-MM-DD) can be booked.
+pub fn judge_calendar(json: &Value, checkin: &str, checkout: &str) -> Verdict {
+    let Some(months) = json
+        .pointer("/data/merlin/pdpAvailabilityCalendar/calendarMonths")
+        .and_then(Value::as_array)
+    else {
+        return Verdict::Unknown("calendar: unexpected response".into());
+    };
+    let days: HashMap<&str, &Value> = months
+        .iter()
+        .filter_map(|m| m.get("days").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|d| Some((d.get("calendarDate")?.as_str()?, d)))
+        .collect();
+    let (Some(start), Some(end)) = (day_number(checkin), day_number(checkout)) else {
+        return Verdict::Unknown("calendar: bad dates".into());
+    };
+    let nights = end - start;
+    let flag = |d: &Value, k: &str| d.get(k).and_then(Value::as_bool);
+
+    let Some(first) = days.get(checkin) else {
+        return Verdict::Unknown("calendar: check-in day missing".into());
+    };
+    if flag(first, "availableForCheckin") == Some(false) || flag(first, "bookable") == Some(false) {
+        return Verdict::Unavailable(format!("no check-in on {checkin}"));
+    }
+    if let Some(min) = first.get("minNights").and_then(Value::as_i64)
+        && nights < min
+    {
+        return Verdict::Unavailable(format!("minimum stay is {min} nights"));
+    }
+    if let Some(max) = first.get("maxNights").and_then(Value::as_i64)
+        && max > 0
+        && nights > max
+    {
+        return Verdict::Unavailable(format!("maximum stay is {max} nights"));
+    }
+    for n in start..end {
+        let date = date_string(n);
+        match days.get(date.as_str()) {
+            None => return Verdict::Unknown(format!("calendar: {date} missing")),
+            Some(d) if flag(d, "available") == Some(false) => {
+                return Verdict::Unavailable(format!("{date} is booked"));
+            }
+            Some(_) => {}
+        }
+    }
+    if let Some(last) = days.get(checkout)
+        && flag(last, "availableForCheckout") == Some(false)
+    {
+        return Verdict::Unavailable(format!("no check-out on {checkout}"));
+    }
+    Verdict::Available
+}
+
+/// The page embeds the web API key as `"api_config":{"key":"…"`.
+fn find_api_key(html: &str) -> Option<String> {
+    const PAT: &str = "\"api_config\":{\"key\":\"";
+    let rest = &html[html.find(PAT)? + PAT.len()..];
+    let key = &rest[..rest.find('"')?];
+    (!key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric())).then(|| key.to_string())
+}
+
+/// `YYYY-MM-DD` → (year, month, day), validated.
+pub fn parse_date(s: &str) -> Option<(i64, u32, u32)> {
+    let mut it = s.split('-');
+    let y: i64 = it.next()?.parse().ok()?;
+    let m: u32 = it.next()?.parse().ok()?;
+    let d: u32 = it.next()?.parse().ok()?;
+    let valid =
+        s.len() == 10 && it.next().is_none() && (1..=12).contains(&m) && (1..=31).contains(&d);
+    valid.then_some((y, m, d))
+}
+
+/// Days since 1970-01-01 (Howard Hinnant's days_from_civil).
+fn day_number(s: &str) -> Option<i64> {
+    let (y, m, d) = parse_date(s)?;
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m as i64 + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146097 + doe - 719468)
+}
+
+/// Inverse of `day_number`.
+fn date_string(z: i64) -> String {
+    let z = z + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// The fixed dates of a search URL, if it has valid ones.
+pub fn search_dates(search_url: &str) -> Option<(String, String)> {
+    let u = Url::parse(search_url).ok()?;
+    let get = |k: &str| {
+        u.query_pairs()
+            .find(|(q, _)| q == k)
+            .map(|(_, v)| v.into_owned())
+    };
+    let (a, b) = (get("checkin")?, get("checkout")?);
+    (day_number(&a)? < day_number(&b)?).then_some((a, b))
+}
+
+/// "10–15 Nov 2026 · 5 nights"-style summary of a stay.
+pub fn stay_label(stay: &(String, String)) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let (Some((y1, m1, d1)), Some((y2, m2, d2)), Some(a), Some(b)) = (
+        parse_date(&stay.0),
+        parse_date(&stay.1),
+        day_number(&stay.0),
+        day_number(&stay.1),
+    ) else {
+        return format!("{} → {}", stay.0, stay.1);
+    };
+    let month = |m: u32| MONTHS[m as usize - 1];
+    let range = if (y1, m1) == (y2, m2) {
+        format!("{d1}–{d2} {} {y2}", month(m2))
+    } else if y1 == y2 {
+        format!("{d1} {} – {d2} {} {y2}", month(m1), month(m2))
+    } else {
+        format!("{d1} {} {y1} – {d2} {} {y2}", month(m1), month(m2))
+    };
+    let n = b - a;
+    format!("{range} · {n} night{}", if n == 1 { "" } else { "s" })
 }
 
 /// ureq accepts almost any string as a proxy, so check it properly: a typo
@@ -445,6 +690,9 @@ fn merge(into: &mut Listing, other: Listing) {
     if into.picture.is_none() {
         into.picture = other.picture;
     }
+    if into.dates.is_none() {
+        into.dates = other.dates;
+    }
 }
 
 fn walk(v: &Value, out: &mut Vec<Listing>, page: &mut Page, saw_search: &mut bool) {
@@ -600,6 +848,14 @@ fn parse_listing(v: &Value) -> Option<Listing> {
         .and_then(Value::as_array)
         .and_then(|a| a.iter().find_map(|p| text(p, &["picture"])));
 
+    let dates = match (
+        text(v, &["listingParamOverrides", "checkin"]),
+        text(v, &["listingParamOverrides", "checkout"]),
+    ) {
+        (Some(a), Some(b)) => Some((a, b)),
+        _ => None,
+    };
+
     Some(Listing {
         id,
         title,
@@ -608,6 +864,7 @@ fn parse_listing(v: &Value) -> Option<Listing> {
         price: price_parts.join(" · "),
         rating,
         picture,
+        dates,
     })
 }
 
@@ -888,5 +1145,184 @@ mod tests {
         let t = std::time::Instant::now();
         f.pause();
         assert!(t.elapsed() < Duration::from_millis(30));
+    }
+
+    fn cal(days: &[(&str, bool, bool, bool)], min: i64, max: i64) -> Value {
+        let days: Vec<Value> = days
+            .iter()
+            .map(|(d, avail, cin, cout)| {
+                serde_json::json!({"calendarDate": d, "available": avail,
+                    "availableForCheckin": cin, "availableForCheckout": cout,
+                    "bookable": null, "minNights": min, "maxNights": max})
+            })
+            .collect();
+        serde_json::json!({"data": {"merlin": {"pdpAvailabilityCalendar": {
+            "calendarMonths": [{"days": days}]
+        }}}})
+    }
+
+    /// 30 Nov – 3 Dec 2026 (3 nights across a month boundary), all free.
+    fn free_stay() -> Vec<(&'static str, bool, bool, bool)> {
+        vec![
+            ("2026-11-30", true, true, false),
+            ("2026-12-01", true, true, true),
+            ("2026-12-02", true, true, true),
+            ("2026-12-03", false, false, true),
+        ]
+    }
+
+    #[test]
+    fn calendar_rules() {
+        let judge = |days: Vec<(&str, bool, bool, bool)>, min, max| {
+            judge_calendar(&cal(&days, min, max), "2026-11-30", "2026-12-03")
+        };
+        assert_eq!(judge(free_stay(), 1, 30), Verdict::Available);
+
+        let mut booked = free_stay();
+        booked[2].1 = false;
+        assert_eq!(
+            judge(booked, 1, 30),
+            Verdict::Unavailable("2026-12-02 is booked".into())
+        );
+        let mut no_checkin = free_stay();
+        no_checkin[0].2 = false;
+        assert!(
+            matches!(judge(no_checkin, 1, 30), Verdict::Unavailable(w) if w.contains("check-in"))
+        );
+        let mut no_checkout = free_stay();
+        no_checkout[3].3 = false;
+        assert!(
+            matches!(judge(no_checkout, 1, 30), Verdict::Unavailable(w) if w.contains("check-out"))
+        );
+        assert!(
+            matches!(judge(free_stay(), 4, 30), Verdict::Unavailable(w) if w.contains("minimum stay is 4"))
+        );
+        assert!(
+            matches!(judge(free_stay(), 1, 2), Verdict::Unavailable(w) if w.contains("maximum stay is 2"))
+        );
+        // maxNights 0 means "no limit".
+        assert_eq!(judge(free_stay(), 1, 0), Verdict::Available);
+        // The check-out day may be outside the returned months.
+        assert_eq!(judge(free_stay()[..3].to_vec(), 1, 30), Verdict::Available);
+
+        // Missing data → Unknown, never a false "booked".
+        assert!(matches!(
+            judge(free_stay()[1..].to_vec(), 1, 30),
+            Verdict::Unknown(_)
+        ));
+        let mut gap = free_stay();
+        gap.remove(1);
+        assert!(
+            matches!(judge(gap, 1, 30), Verdict::Unknown(w) if w.contains("2026-12-01 missing"))
+        );
+        assert!(matches!(
+            judge_calendar(
+                &serde_json::json!({"errors": []}),
+                "2026-11-30",
+                "2026-12-03"
+            ),
+            Verdict::Unknown(_)
+        ));
+        assert!(matches!(
+            judge_calendar(&cal(&free_stay(), 1, 30), "bad", "2026-12-03"),
+            Verdict::Unknown(_)
+        ));
+
+        // "bookable": false on the check-in day.
+        let mut v = cal(&free_stay(), 1, 30);
+        v["data"]["merlin"]["pdpAvailabilityCalendar"]["calendarMonths"][0]["days"][0]["bookable"] =
+            false.into();
+        assert!(matches!(
+            judge_calendar(&v, "2026-11-30", "2026-12-03"),
+            Verdict::Unavailable(_)
+        ));
+    }
+
+    #[test]
+    fn date_arithmetic() {
+        assert_eq!(day_number("1970-01-01"), Some(0));
+        assert_eq!(date_string(0), "1970-01-01");
+        for d in [
+            "2024-02-29",
+            "2026-12-31",
+            "2027-01-01",
+            "2000-03-01",
+            "1999-12-31",
+        ] {
+            assert_eq!(date_string(day_number(d).unwrap()), d);
+        }
+        assert_eq!(
+            day_number("2024-03-01").unwrap() - day_number("2024-02-28").unwrap(),
+            2,
+            "leap year"
+        );
+        assert_eq!(
+            day_number("2026-03-01").unwrap() - day_number("2026-02-28").unwrap(),
+            1
+        );
+        for bad in [
+            "2026-13-01",
+            "2026-00-10",
+            "2026-1-5",
+            "x",
+            "2026-01-01-01",
+            "2026-01-32",
+        ] {
+            assert!(parse_date(bad).is_none(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn search_dates_and_labels() {
+        let u = "https://www.airbnb.com/s/x/homes?checkin=2026-11-10&checkout=2026-11-15&adults=2";
+        let stay = search_dates(u).unwrap();
+        assert_eq!(stay, ("2026-11-10".into(), "2026-11-15".into()));
+        assert_eq!(stay_label(&stay), "10–15 Nov 2026 · 5 nights");
+        assert_eq!(
+            stay_label(&("2026-11-30".into(), "2026-12-01".into())),
+            "30 Nov – 1 Dec 2026 · 1 night"
+        );
+        assert_eq!(
+            stay_label(&("2026-12-30".into(), "2027-01-02".into())),
+            "30 Dec 2026 – 2 Jan 2027 · 3 nights"
+        );
+        assert_eq!(stay_label(&("a".into(), "b".into())), "a → b");
+        for no in [
+            "https://www.airbnb.com/s/x/homes",
+            "https://www.airbnb.com/s/x/homes?checkin=2026-11-10",
+            "https://www.airbnb.com/s/x/homes?checkin=2026-11-15&checkout=2026-11-10",
+            "https://www.airbnb.com/s/x/homes?checkin=soon&checkout=later",
+            "not a url",
+        ] {
+            assert!(search_dates(no).is_none(), "{no}");
+        }
+    }
+
+    #[test]
+    fn listing_dates_and_matching() {
+        let v = serde_json::json!({"__typename": "StaySearchResult", "listingId": 1,
+            "listingParamOverrides": {"checkin": "2026-12-01", "checkout": "2026-12-06"}});
+        let l = parse_listing(&v).unwrap();
+        assert_eq!(l.dates, Some(("2026-12-01".into(), "2026-12-06".into())));
+        let want = ("2026-11-10".to_string(), "2026-11-15".to_string());
+        assert!(!l.matches_dates(Some(&want)));
+        assert!(l.matches_dates(Some(&("2026-12-01".into(), "2026-12-06".into()))));
+        assert!(l.matches_dates(None), "flexible searches match everything");
+        let half = serde_json::json!({"listingId": 2, "__typename": "StaySearchResult",
+            "listingParamOverrides": {"checkin": "2026-12-01", "checkout": null}});
+        assert_eq!(parse_listing(&half).unwrap().dates, None);
+        assert!(Listing::default().matches_dates(Some(&want)));
+    }
+
+    #[test]
+    fn api_key_is_read_from_the_page() {
+        assert_eq!(
+            find_api_key(r#"x{"api_config":{"key":"abc123XYZ","baseUrl":"/api"}}"#),
+            Some("abc123XYZ".into())
+        );
+        assert_eq!(find_api_key(r#"{"api_config":{"key":""}}"#), None);
+        assert_eq!(find_api_key(r#"{"api_config":{"key":"<script>"}}"#), None);
+        assert_eq!(find_api_key(r#"{"api_config":{"key":"unterminated"#), None);
+        assert_eq!(find_api_key("nothing here"), None);
     }
 }

@@ -96,19 +96,52 @@ pub fn user(path: &Path, action: UserAction, out: &mut dyn Write) -> Result<()> 
     Ok(())
 }
 
-pub fn test(path: &Path, url: &str, pages: u32, out: &mut dyn Write) -> Result<()> {
+/// `verify`: also check each listing's live calendar for the searched dates.
+pub fn test(path: &Path, url: &str, pages: u32, verify: bool, out: &mut dyn Write) -> Result<()> {
     let cfg = Config::load(path)?;
     let fetcher = fetcher(&cfg)?;
     let url = fetcher.resolve(url)?;
     writeln!(out, "Search URL: {url}")?;
     writeln!(out, "Default name: {}", airbnb::default_name(&url))?;
-    let listings = fetcher.fetch_all(&url, pages.max(1))?;
-    writeln!(out, "Found {} listings:", listings.len())?;
-    for l in &listings {
+    let wanted = airbnb::search_dates(&url);
+    match &wanted {
+        Some(stay) => writeln!(out, "Dates: {}", airbnb::stay_label(stay))?,
+        None => writeln!(out, "Dates: none (flexible search, nothing to verify)")?,
+    }
+    let scan = fetcher.fetch_all(&url, pages.max(1))?;
+    let exact = scan
+        .listings
+        .iter()
+        .filter(|l| l.matches_dates(wanted.as_ref()))
+        .count();
+    writeln!(
+        out,
+        "Found {} listings, {exact} for your dates{}:",
+        scan.listings.len(),
+        if scan.complete {
+            ""
+        } else {
+            " (more pages not read)"
+        }
+    )?;
+    for l in &scan.listings {
         let name = if l.name.is_empty() { &l.title } else { &l.name };
+        let status = if !l.matches_dates(wanted.as_ref()) {
+            let (a, b) = l.dates.clone().unwrap_or_default();
+            format!("OTHER DATES {a}..{b}")
+        } else {
+            match (&wanted, verify) {
+                (Some(stay), true) => match fetcher.verify(&url, l.id, stay) {
+                    airbnb::Verdict::Available => "FREE".to_string(),
+                    airbnb::Verdict::Unavailable(why) => format!("BOOKED ({why})"),
+                    airbnb::Verdict::Unknown(why) => format!("UNKNOWN ({why})"),
+                },
+                _ => "your dates".to_string(),
+            }
+        };
         writeln!(
             out,
-            "  {:>20}  {}  |  {}  |  {}",
+            "  {:>20}  [{status}]  {}  |  {}  |  {}",
             l.id, name, l.price, l.rating
         )?;
     }
@@ -256,10 +289,13 @@ mod tests {
         let url = "https://www.airbnb.com/s/x/homes";
         // Fail on each of the lines in turn: URL, name, count, listing.
         for ok in 0..4 {
-            assert!(test(&p, url, 1, &mut Broken { ok }).is_err(), "ok={ok}");
+            assert!(
+                test(&p, url, 1, false, &mut Broken { ok }).is_err(),
+                "ok={ok}"
+            );
         }
         let mut out = Vec::new();
-        test(&p, url, 1, &mut out).unwrap();
+        test(&p, url, 1, false, &mut out).unwrap();
         assert!(String::from_utf8(out).unwrap().contains("Found 1 listings"));
     }
 

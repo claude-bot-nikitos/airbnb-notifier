@@ -13,7 +13,7 @@ fn sends_messages_with_keyboard_photos_edits_and_answers() {
 
     tg.send(5, "<b>hi</b>", Some(&kb)).unwrap();
     tg.send(5, "plain", None).unwrap();
-    tg.send_photo(5, "https://img/x.jpg", "cap").unwrap();
+    tg.send_photo(5, "https://img/x.jpg", "cap", None).unwrap();
     tg.edit(5, 77, "edited", Some(&kb)).unwrap();
     tg.edit(5, 78, "edited2", None).unwrap();
     tg.answer_callback("cb1", "Paused").unwrap();

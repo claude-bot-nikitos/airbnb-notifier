@@ -20,6 +20,32 @@ you <──(🏠 new listing: photo, price, rating, link)── bot
    Use `/list` to **pause / resume / rename / delete** it. You can have as many
    searches as you want.
 
+### What counts as "new" (and why alerts are bookable)
+
+For a search with dates, a listing is alerted only when all three hold:
+
+- **It's offered for your dates.** When few places are free, Airbnb fills the
+  results with places free on *other* dates ("available for similar dates").
+  Those look like matches but open as unavailable. The bot reads which dates
+  each result is for and ignores the others. If one later opens up for your
+  dates, you get an alert.
+- **Its live calendar confirms the stay.** Search results lag behind bookings,
+  so right before alerting, the bot checks the listing's availability calendar
+  for your dates: every night free, check-in and check-out allowed, and your
+  stay within the minimum/maximum nights. If the place is listed but booked, it
+  stays quiet and checks again next time. If the check itself fails, you still
+  get the alert, marked "⚠️ couldn't confirm", so nothing is missed.
+- **You haven't been alerted about it yet, or it came back.** A place you were
+  alerted about that disappears (booked) for at least 30 minutes and then
+  returns (a cancellation) is alerted again as **🔁 Available again**.
+
+Each alert has a **🔗 Open in Airbnb** button that opens the listing with your
+dates and guests filled in.
+
+**Be fast on good places:** use `/every <id> 3` to check an important search
+every 3 minutes. Adding the **Instant Book** filter on Airbnb (`ib=true` in the
+link) limits results to places you can book without waiting for the host.
+
 The bot accepts full search URLs (`airbnb.*/s/.../homes?...`) and app share or
 short links. It follows short links until it reaches the search URL.
 
@@ -30,6 +56,7 @@ short links. It follows short links until it reaches the search URL.
 | *(send a link)* | create a search |
 | `/list` | your searches, each with ⏸ Pause / ✏️ Rename / 🗑 Delete buttons |
 | `/check` | check all your searches now |
+| `/every <id> <minutes>` | how often to check this search (2–1440, or `default`) |
 | `/rename <id> <name>` | rename a search |
 | `/pause <id>`, `/resume <id>`, `/delete <id>` | same actions as the buttons |
 
@@ -131,7 +158,9 @@ airbnb-notifier run                  run the bot
 airbnb-notifier user add <id>        allow a Telegram user
 airbnb-notifier user remove <id>     revoke access (their searches pause)
 airbnb-notifier user list
-airbnb-notifier test <url> [--pages N]   fetch a search once and print the listings
+airbnb-notifier test <url> [--pages N] [--verify]
+                                     fetch a search once and print the listings: whether each
+                                     is for your dates, and with --verify if it is really free
 ```
 
 The config path defaults to `./config.toml`. Change it with `--config` or
@@ -232,4 +261,8 @@ cargo test --target aarch64-unknown-linux-musl
 - Only the first `max_pages` pages are scanned. For broad searches with hundreds
   of results, a listing that was always ranked beyond that limit and later moves
   up counts as "new". Narrow searches (map area, price, dates) avoid this.
-- A listing that disappears and comes back later isn't reported again.
+- Returning listings are detected only when every result page is read
+  (`max_pages` is high enough), and only after 30 minutes away.
+- The calendar check uses Airbnb's internal API. If Airbnb changes it, alerts
+  keep coming but say "couldn't confirm". `airbnb-notifier test <url> --verify`
+  shows whether checks work.

@@ -4,7 +4,7 @@ mod common;
 
 use std::time::Duration;
 
-use airbnb_notifier::airbnb::Fetcher;
+use airbnb_notifier::airbnb::{Fetcher, Verdict};
 use common::{FakeAirbnb, MockServer, Response, cursors, search_page};
 
 const SEARCH: &str = "https://www.airbnb.com/s/Lisbon--Portugal/homes?adults=2&checkin=2026-11-10";
@@ -20,11 +20,12 @@ fn fetcher(origin: &str) -> Fetcher {
 #[test]
 fn fetches_all_pages_via_page_cursors() {
     let fake = FakeAirbnb::start(&(1..=7).collect::<Vec<_>>(), 3);
-    let listings = fetcher(&fake.server.url()).fetch_all(SEARCH, 10).unwrap();
+    let scan = fetcher(&fake.server.url()).fetch_all(SEARCH, 10).unwrap();
     assert_eq!(
-        listings.iter().map(|l| l.id).collect::<Vec<_>>(),
+        scan.listings.iter().map(|l| l.id).collect::<Vec<_>>(),
         (1..=7).collect::<Vec<_>>()
     );
+    assert!(scan.complete, "every page was read");
 
     let reqs = fake.server.requests();
     assert_eq!(reqs.len(), 3, "3 pages of 3");
@@ -50,8 +51,9 @@ fn fetches_all_pages_via_page_cursors() {
 #[test]
 fn respects_max_pages() {
     let fake = FakeAirbnb::start(&(1..=9).collect::<Vec<_>>(), 3);
-    let listings = fetcher(&fake.server.url()).fetch_all(SEARCH, 2).unwrap();
-    assert_eq!(listings.len(), 6);
+    let scan = fetcher(&fake.server.url()).fetch_all(SEARCH, 2).unwrap();
+    assert_eq!(scan.listings.len(), 6);
+    assert!(!scan.complete, "a third page was left unread");
     assert_eq!(fake.server.requests().len(), 2);
 }
 
@@ -59,7 +61,10 @@ fn respects_max_pages() {
 fn stops_when_a_page_brings_nothing_new() {
     // A broken server that ignores the cursor and keeps returning page 1.
     let server = MockServer::start(|_| Response::html(search_page(&[1, 2], &cursors(5))));
-    let listings = fetcher(&server.url()).fetch_all(SEARCH, 10).unwrap();
+    let listings = fetcher(&server.url())
+        .fetch_all(SEARCH, 10)
+        .unwrap()
+        .listings;
     assert_eq!(listings.len(), 2);
     assert_eq!(server.requests().len(), 2);
 }
@@ -78,7 +83,10 @@ fn uses_next_page_cursor_when_present() {
         }}}}}]]});
         Response::html(common::wrap_state(&state))
     });
-    let listings = fetcher(&server.url()).fetch_all(SEARCH, 10).unwrap();
+    let listings = fetcher(&server.url())
+        .fetch_all(SEARCH, 10)
+        .unwrap()
+        .listings;
     assert_eq!(
         listings.iter().map(|l| l.id).collect::<Vec<_>>(),
         vec![1, 2]
@@ -92,6 +100,7 @@ fn empty_search_is_ok() {
         fetcher(&fake.server.url())
             .fetch_all(SEARCH, 10)
             .unwrap()
+            .listings
             .is_empty()
     );
 }
@@ -153,6 +162,7 @@ fn rotates_to_the_next_proxy_on_failure_and_sticks_with_it() {
     let ids: Vec<u64> = f
         .fetch_all(SEARCH, 1)
         .unwrap()
+        .listings
         .iter()
         .map(|l| l.id)
         .collect();
@@ -179,7 +189,7 @@ fn captcha_via_one_proxy_also_rotates() {
         .unwrap()
         .with_origin("http://airbnb.test")
         .unwrap();
-    assert_eq!(f.fetch_all(SEARCH, 1).unwrap()[0].id, 9);
+    assert_eq!(f.fetch_all(SEARCH, 1).unwrap().listings[0].id, 9);
 }
 
 #[test]
@@ -278,5 +288,80 @@ fn resolve_rejects_other_links() {
     assert!(
         err.to_string().contains("doesn't look like a link"),
         "{err}"
+    );
+}
+
+const DATED: &str =
+    "https://www.airbnb.com/s/Rome/homes?adults=2&checkin=2026-11-10&checkout=2026-11-15";
+
+fn stay() -> (String, String) {
+    ("2026-11-10".into(), "2026-11-15".into())
+}
+
+#[test]
+fn verify_uses_the_calendar_with_the_page_api_key() {
+    let fake = FakeAirbnb::start(&[1, 2], 10);
+    fake.booked.lock().unwrap().insert(2);
+    let f = fetcher(&fake.server.url());
+
+    // Before any page was fetched the built-in key is used; this fake rejects it.
+    assert!(matches!(f.verify(DATED, 1, &stay()), Verdict::Unknown(w) if w.contains("HTTP 403")));
+
+    // A search page carries the current key; later checks use it.
+    f.fetch_all(DATED, 1).unwrap();
+    assert_eq!(f.verify(DATED, 1, &stay()), Verdict::Available);
+    assert_eq!(
+        f.verify(DATED, 2, &stay()),
+        Verdict::Unavailable("no check-in on 2026-11-10".into())
+    );
+
+    let req = fake.calendar_requests().pop().unwrap();
+    assert_eq!(req.header("X-Airbnb-Api-Key"), Some(common::FAKE_API_KEY));
+    assert_eq!(
+        req.query("operationName").as_deref(),
+        Some("PdpAvailabilityCalendar")
+    );
+    let vars: serde_json::Value = serde_json::from_str(&req.query("variables").unwrap()).unwrap();
+    assert_eq!(vars["request"]["listingId"], "2");
+    assert_eq!(vars["request"]["month"], 11);
+    assert_eq!(vars["request"]["year"], 2026);
+}
+
+#[test]
+fn verify_reports_failures_as_unknown() {
+    let fake = FakeAirbnb::start(&[1], 10);
+    let f = fetcher(&fake.server.url());
+    f.fetch_all(DATED, 1).unwrap();
+    *fake.fail_with.lock().unwrap() = Some(500);
+    assert!(matches!(f.verify(DATED, 1, &stay()), Verdict::Unknown(w) if w.contains("HTTP 500")));
+    // Unparseable response and bad dates.
+    let junk = MockServer::start(|_| Response::html("not json"));
+    let f = fetcher(&junk.url());
+    assert!(matches!(f.verify(DATED, 1, &stay()), Verdict::Unknown(_)));
+    let bad = ("soon".to_string(), "later".to_string());
+    assert!(matches!(f.verify(DATED, 1, &bad), Verdict::Unknown(w) if w.contains("bad date")));
+    // Without an origin override the search's own host is used (unreachable here).
+    let direct = Fetcher::new(&["http://127.0.0.1:1".into()]).unwrap();
+    assert!(
+        matches!(direct.verify(DATED, 1, &stay()), Verdict::Unknown(w) if w.contains("network"))
+    );
+}
+
+#[test]
+fn results_carry_the_dates_they_are_offered_for() {
+    let fake = FakeAirbnb::start(&[1, 2], 10);
+    fake.other_dates.lock().unwrap().push(9);
+    let scan = fetcher(&fake.server.url()).fetch_all(DATED, 1).unwrap();
+    let wanted = stay();
+    let exact: Vec<u64> = scan
+        .listings
+        .iter()
+        .filter(|l| l.matches_dates(Some(&wanted)))
+        .map(|l| l.id)
+        .collect();
+    assert_eq!(exact, vec![1, 2]);
+    assert_eq!(
+        scan.listings[2].dates,
+        Some(("2026-12-01".into(), "2026-12-06".into()))
     );
 }

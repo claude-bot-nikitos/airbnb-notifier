@@ -2,7 +2,7 @@
 //! Telegram Bot API.
 #![allow(dead_code)]
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -212,10 +212,20 @@ pub fn stay(id: u64) -> Value {
     })
 }
 
+/// Web API key the fake pages embed; the fake calendar API requires it.
+pub const FAKE_API_KEY: &str = "fakeKey123";
+
+/// `stay(id)` offered for specific dates, like Airbnb's `listingParamOverrides`.
+pub fn stay_for(id: u64, checkin: &str, checkout: &str) -> Value {
+    let mut v = stay(id);
+    v["listingParamOverrides"] = json!({"checkin": checkin, "checkout": checkout, "adults": 2});
+    v
+}
+
 /// Wraps a deferred-state JSON value in an HTML page like Airbnb serves.
 pub fn wrap_state(state: &Value) -> String {
     format!(
-        "<!doctype html><html><head><script>window.x = {{}};</script>\
+        "<!doctype html><html><head><script>window.x = {{\"api_config\":{{\"key\":\"{FAKE_API_KEY}\"}}}};</script>\
          <script id=\"data-injector-instances\" type=\"application/json\">{{\"a\":1}}</script>\
          </head><body><div id=\"root\"></div>\
          <script id=\"data-deferred-state-0\" data-deferred-state-0=\"true\" type=\"application/json\">{state}</script>\
@@ -225,7 +235,10 @@ pub fn wrap_state(state: &Value) -> String {
 
 /// A search results page with the given listing ids and pagination cursors.
 pub fn search_page(ids: &[u64], page_cursors: &[String]) -> String {
-    let results: Vec<Value> = ids.iter().map(|&id| stay(id)).collect();
+    search_page_of(ids.iter().map(|&id| stay(id)).collect(), page_cursors)
+}
+
+pub fn search_page_of(results: Vec<Value>, page_cursors: &[String]) -> String {
     let state = json!({
         "niobeClientData": [[
             "StaysSearch:{}",
@@ -244,10 +257,18 @@ pub fn cursors(n: usize) -> Vec<String> {
     (0..n).map(|i| format!("CURSOR{i}")).collect()
 }
 
-/// Fake Airbnb: listings split into pages of `per_page`, addressed by `cursor`.
+/// Fake Airbnb: listings split into pages of `per_page`, addressed by
+/// `cursor`, plus the availability calendar API.
 pub struct FakeAirbnb {
     pub server: MockServer,
+    /// Listings offered for the searched dates.
     pub listings: Arc<Mutex<Vec<u64>>>,
+    /// "Available for similar dates" padding, offered for 1–6 Dec instead.
+    pub other_dates: Arc<Mutex<Vec<u64>>>,
+    /// Listings whose calendar is fully booked.
+    pub booked: Arc<Mutex<HashSet<u64>>>,
+    /// When set, the calendar API fails with HTTP 500.
+    pub calendar_down: Arc<Mutex<bool>>,
     /// When set, every request gets this status code.
     pub fail_with: Arc<Mutex<Option<u16>>>,
 }
@@ -255,12 +276,27 @@ pub struct FakeAirbnb {
 impl FakeAirbnb {
     pub fn start(initial: &[u64], per_page: usize) -> FakeAirbnb {
         let listings = Arc::new(Mutex::new(initial.to_vec()));
+        let other_dates = Arc::new(Mutex::new(Vec::new()));
+        let booked = Arc::new(Mutex::new(HashSet::new()));
         let fail_with = Arc::new(Mutex::new(None));
+        let calendar_down = Arc::new(Mutex::new(false));
         let server = {
-            let (listings, fail_with) = (listings.clone(), fail_with.clone());
+            let (listings, other_dates, booked, fail_with, calendar_down) = (
+                listings.clone(),
+                other_dates.clone(),
+                booked.clone(),
+                fail_with.clone(),
+                calendar_down.clone(),
+            );
             MockServer::start(move |req| {
                 if let Some(code) = *fail_with.lock().unwrap() {
                     return Response::status(code, "blocked");
+                }
+                if req.target.starts_with("/api/v3/PdpAvailabilityCalendar/") {
+                    if *calendar_down.lock().unwrap() {
+                        return Response::status(500, "oops");
+                    }
+                    return calendar(req, &booked.lock().unwrap());
                 }
                 let all = listings.lock().unwrap().clone();
                 let pages = all.len().div_ceil(per_page).max(1);
@@ -269,20 +305,49 @@ impl FakeAirbnb {
                     .query("cursor")
                     .and_then(|c| cursors.iter().position(|x| *x == c))
                     .unwrap_or(0);
-                let slice: Vec<u64> = all
+                let dates = req.query("checkin").zip(req.query("checkout"));
+                let mut results: Vec<Value> = all
                     .iter()
                     .skip(page * per_page)
                     .take(per_page)
-                    .copied()
+                    .map(|&id| match &dates {
+                        Some((a, b)) => stay_for(id, a, b),
+                        None => stay(id),
+                    })
                     .collect();
-                Response::html(search_page(&slice, &cursors))
+                if page + 1 == pages {
+                    for &id in other_dates.lock().unwrap().iter() {
+                        results.push(stay_for(id, "2026-12-01", "2026-12-06"));
+                    }
+                }
+                Response::html(search_page_of(results, &cursors))
             })
         };
         FakeAirbnb {
             server,
             listings,
+            other_dates,
+            booked,
             fail_with,
+            calendar_down,
         }
+    }
+
+    /// Requests for search pages (not the calendar API).
+    pub fn search_requests(&self) -> Vec<Request> {
+        self.server
+            .requests()
+            .into_iter()
+            .filter(|r| r.target.starts_with("/s/"))
+            .collect()
+    }
+
+    pub fn calendar_requests(&self) -> Vec<Request> {
+        self.server
+            .requests()
+            .into_iter()
+            .filter(|r| r.target.starts_with("/api/v3/PdpAvailabilityCalendar/"))
+            .collect()
     }
 
     pub fn add(&self, id: u64) {
@@ -443,4 +508,48 @@ pub fn bin_command() -> std::process::Command {
         }
         _ => std::process::Command::new(exe),
     }
+}
+
+/// Fake PdpAvailabilityCalendar: two months from the requested one; every day
+/// is free unless the listing is booked. Requires the page's API key.
+pub fn calendar(req: &Request, booked: &HashSet<u64>) -> Response {
+    if req.header("X-Airbnb-Api-Key") != Some(FAKE_API_KEY) {
+        return Response::status(403, "bad key");
+    }
+    let vars: Value = serde_json::from_str(&req.query("variables").unwrap_or_default()).unwrap();
+    let id: u64 = vars["request"]["listingId"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let (mut year, mut month) = (
+        vars["request"]["year"].as_i64().unwrap(),
+        vars["request"]["month"].as_i64().unwrap(),
+    );
+    let free = !booked.contains(&id);
+    let mut months = Vec::new();
+    for _ in 0..2 {
+        let days: Vec<Value> = (1..=31)
+            .map(|d| {
+                json!({
+                    "calendarDate": format!("{year:04}-{month:02}-{d:02}"),
+                    "available": free,
+                    "availableForCheckin": free,
+                    "availableForCheckout": true,
+                    "bookable": null,
+                    "minNights": 1,
+                    "maxNights": 365
+                })
+            })
+            .collect();
+        months.push(json!({"month": month, "year": year, "days": days}));
+        month += 1;
+        if month > 12 {
+            month = 1;
+            year += 1;
+        }
+    }
+    Response::json(
+        json!({"data": {"merlin": {"pdpAvailabilityCalendar": {"calendarMonths": months}}}}),
+    )
 }

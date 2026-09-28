@@ -19,7 +19,8 @@ pub enum Update {
     },
 }
 
-/// Inline keyboard: rows of (label, callback_data).
+/// Inline keyboard: rows of (label, callback_data). Data starting with
+/// `http://` or `https://` makes a link button instead.
 pub type Keyboard = Vec<Vec<(String, String)>>;
 
 pub struct Telegram {
@@ -92,17 +93,23 @@ impl Telegram {
         self.call("sendMessage", body).map(|_| ())
     }
 
-    pub fn send_photo(&self, chat_id: i64, photo_url: &str, caption_html: &str) -> Result<()> {
-        self.call(
-            "sendPhoto",
-            json!({
-                "chat_id": chat_id,
-                "photo": photo_url,
-                "caption": caption_html,
-                "parse_mode": "HTML",
-            }),
-        )
-        .map(|_| ())
+    pub fn send_photo(
+        &self,
+        chat_id: i64,
+        photo_url: &str,
+        caption_html: &str,
+        kb: Option<&Keyboard>,
+    ) -> Result<()> {
+        let mut body = json!({
+            "chat_id": chat_id,
+            "photo": photo_url,
+            "caption": caption_html,
+            "parse_mode": "HTML",
+        });
+        if let Some(kb) = kb {
+            body["reply_markup"] = keyboard_json(kb);
+        }
+        self.call("sendPhoto", body).map(|_| ())
     }
 
     pub fn edit(
@@ -152,7 +159,13 @@ fn keyboard_json(kb: &Keyboard) -> Value {
         .map(|row| {
             Value::Array(
                 row.iter()
-                    .map(|(text, data)| json!({"text": text, "callback_data": data}))
+                    .map(|(text, data)| {
+                        if data.starts_with("https://") || data.starts_with("http://") {
+                            json!({"text": text, "url": data})
+                        } else {
+                            json!({"text": text, "callback_data": data})
+                        }
+                    })
                     .collect(),
             )
         })

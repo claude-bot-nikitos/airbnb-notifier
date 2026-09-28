@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -16,8 +16,20 @@ pub struct Search {
     /// False until the first successful fetch has recorded the current listings.
     #[serde(default)]
     pub initialized: bool,
+    /// Listings already alerted, or bookable for the searched dates when the
+    /// search started. Places offered only for other dates are not in here.
     #[serde(default)]
     pub seen: BTreeSet<u64>,
+    /// Seen listings missing from the latest complete scan (booked, hidden),
+    /// with the time they went missing. They are alerted again on return.
+    #[serde(default)]
+    pub gone: BTreeMap<u64, i64>,
+    /// Per-search check interval; `None` uses the config default.
+    #[serde(default)]
+    pub interval_minutes: Option<u64>,
+    /// Version of the `seen` semantics; older searches are re-baselined silently.
+    #[serde(default)]
+    pub schema: u32,
     #[serde(default)]
     pub created_at: i64,
     #[serde(default)]
@@ -27,6 +39,9 @@ pub struct Search {
     #[serde(default)]
     pub failures: u32,
 }
+
+/// Current meaning of `Search::seen` (2: exact-date matches only).
+pub const SCHEMA: u32 = 2;
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 struct Data {
@@ -74,6 +89,9 @@ impl Store {
             paused: false,
             initialized: false,
             seen: BTreeSet::new(),
+            gone: BTreeMap::new(),
+            interval_minutes: None,
+            schema: SCHEMA,
             created_at: crate::util::now_ts(),
             last_check: 0,
             last_error: None,
@@ -114,14 +132,22 @@ impl Store {
     }
 
     /// Active searches whose last check (successful or not) is older than
-    /// `interval_secs`. New searches have `last_check == 0`, so they are due at once.
-    pub fn due(&self, now: i64, interval_secs: i64) -> Vec<Search> {
+    /// their interval (`default_secs` unless set per search). New searches have
+    /// `last_check == 0`, so they are due at once.
+    pub fn due(&self, now: i64, default_secs: i64) -> Vec<Search> {
         self.data
             .searches
             .iter()
-            .filter(|s| !s.paused && now - s.last_check >= interval_secs)
+            .filter(|s| {
+                let interval = s.interval_minutes.map_or(default_secs, |m| m as i64 * 60);
+                !s.paused && now - s.last_check >= interval
+            })
             .cloned()
             .collect()
+    }
+
+    pub fn get(&self, id: u32) -> Option<&Search> {
+        self.data.searches.iter().find(|s| s.id == id)
     }
 }
 
@@ -203,5 +229,46 @@ mod tests {
         st.add(1, "c".into(), "u".into());
         let names: Vec<&str> = st.for_chat(1).iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["a", "c"]);
+    }
+
+    #[test]
+    fn per_search_interval() {
+        let mut st = Store::load(&tmp("interval")).unwrap();
+        st.add(1, "fast".into(), "u".into());
+        st.add(1, "slow".into(), "u".into());
+        for id in [1, 2] {
+            st.get_mut(id).unwrap().last_check = 1000;
+        }
+        st.get_mut(1).unwrap().interval_minutes = Some(2);
+        // 3 minutes later, only the 2-minute search is due (default is 15).
+        let due: Vec<u32> = st.due(1180, 900).iter().map(|s| s.id).collect();
+        assert_eq!(due, vec![1]);
+        assert_eq!(st.get(2).unwrap().name, "slow");
+        assert!(st.get(9).is_none());
+    }
+
+    #[test]
+    fn files_from_older_versions_load_with_defaults() {
+        let p = tmp("old");
+        std::fs::write(
+            &p,
+            r#"{"next_id":2,"searches":[{"id":1,"chat_id":5,"name":"n","url":"u","initialized":true,"seen":[1,2]}]}"#,
+        )
+        .unwrap();
+        let st = Store::load(&p).unwrap();
+        let s = st.get(1).unwrap();
+        assert_eq!(s.schema, 0, "will be re-baselined");
+        assert!(s.gone.is_empty());
+        assert_eq!(s.interval_minutes, None);
+        // New searches start on the current schema; gone survives a save.
+        let mut st = st;
+        let id = st.add(5, "new".into(), "u".into()).id;
+        assert_eq!(st.get(id).unwrap().schema, SCHEMA);
+        st.get_mut(1).unwrap().gone.insert(7, 123);
+        st.save().unwrap();
+        assert_eq!(
+            Store::load(&p).unwrap().get(1).unwrap().gone.get(&7),
+            Some(&123)
+        );
     }
 }

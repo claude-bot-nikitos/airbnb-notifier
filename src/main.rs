@@ -48,6 +48,9 @@ enum Command {
         /// Pages to fetch
         #[arg(long, default_value_t = 1)]
         pages: u32,
+        /// Also check each listing's live calendar for the searched dates
+        #[arg(long)]
+        verify: bool,
     },
 }
 
@@ -88,6 +91,6 @@ fn real_main() -> Result<()> {
             };
             app::user(&cli.config, action, out)
         }
-        Command::Test { url, pages } => app::test(&cli.config, &url, pages, out),
+        Command::Test { url, pages, verify } => app::test(&cli.config, &url, pages, verify, out),
     }
 }

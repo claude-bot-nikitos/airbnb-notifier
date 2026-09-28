@@ -123,6 +123,8 @@ fn full_user_journey() {
     let dir = temp_dir("journey");
     let tg = FakeTelegram::start();
     let airbnb = FakeAirbnb::start(&[1, 2, 3, 4, 5], 2); // 3 pages
+    // Airbnb pads thin results with places free only on other dates.
+    airbnb.other_dates.lock().unwrap().extend([900, 901]);
     let config = write_config(&dir, &tg, &airbnb);
     let bot = Running::start(&config);
 
@@ -148,14 +150,22 @@ fn full_user_journey() {
         ME,
         "Search <b>#1</b> created: <b>Lisbon, Portugal</b>",
     );
-    tg.wait_message(mark, ME, "5 current listings saved");
+    let live = tg.wait_message(mark, ME, "5 listing(s) for your dates saved");
+    assert!(
+        text(&live).contains("2 more are only free on other dates"),
+        "{live}"
+    );
     assert!(
         photos_to(&tg, mark, ME).is_empty(),
         "baseline must be silent"
     );
     // All 3 pages were requested, with the user's filters.
-    let reqs = airbnb.server.requests();
+    let reqs = airbnb.search_requests();
     assert_eq!(reqs.len(), 3);
+    assert!(
+        airbnb.calendar_requests().is_empty(),
+        "no checks for the baseline"
+    );
     assert!(reqs.iter().all(|r| r.target.contains("checkin=2026-11-10")));
 
     // Name it.
@@ -163,8 +173,13 @@ fn full_user_journey() {
     tg.user_says(ME, "Lisbon trip");
     tg.wait_message(mark, ME, "now called <b>Lisbon trip</b>");
 
-    // A new flat appears → one notification with photo, price and link.
+    // Three new results: 42 is free, 50 is listed but its calendar is booked
+    // (search results lag behind bookings), 902 is only free on other dates.
+    // Only 42 is alerted.
     airbnb.add(42);
+    airbnb.add(50);
+    airbnb.booked.lock().unwrap().insert(50);
+    airbnb.other_dates.lock().unwrap().push(902);
     let mark = tg.calls().len();
     tg.user_says(ME, "/check");
     tg.wait_message(mark, ME, "Checking 1 search");
@@ -177,19 +192,44 @@ fn full_user_journey() {
     assert!(caption.contains("New in “Lisbon trip”"), "{caption}");
     assert!(caption.contains("<b>Flat 42</b>"), "{caption}");
     assert!(caption.contains("€142 for 5 nights"), "{caption}");
-    assert!(caption.contains("10–15 Nov"), "{caption}");
+    assert!(
+        caption.contains("📅 10–15 Nov 2026 · 5 nights"),
+        "{caption}"
+    );
+    assert!(caption.contains("✅ Free for your dates"), "{caption}");
+    let button = &photo["reply_markup"]["inline_keyboard"][0][0];
+    assert_eq!(button["text"], "🔗 Open in Airbnb");
+    assert!(button["url"].as_str().unwrap().contains("/rooms/42?"));
     assert!(!caption.contains("kilometres"), "{caption}");
     assert!(
         caption.contains("rooms/42?adults=2&amp;check_in=2026-11-10&amp;check_out=2026-11-15"),
         "{caption}"
     );
-    assert_eq!(photos_to(&tg, mark, ME).len(), 1, "only the new listing");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(photos_to(&tg, mark, ME).len(), 1, "only the free listing");
+    // Both candidates were checked against the calendar, with the page's API key.
+    let checked: Vec<String> = airbnb
+        .calendar_requests()
+        .iter()
+        .map(|r| r.query("variables").unwrap())
+        .collect();
+    assert_eq!(checked.len(), 2, "{checked:?}");
+    assert!(checked.iter().any(|v| v.contains("\"listingId\":\"50\"")));
+
+    // The booked one frees up (a cancellation) → alerted on the next check.
+    airbnb.booked.lock().unwrap().clear();
+    let mark = tg.calls().len();
+    tg.user_says(ME, "/check");
+    tg.wait_for(mark, "photo for 50", |m, b| {
+        m == "sendPhoto" && text(b).contains("/rooms/50")
+    });
 
     // /list shows the search with its buttons.
     let mark = tg.calls().len();
     tg.user_says(ME, "/list");
     let card = tg.wait_message(mark, ME, "#1 Lisbon trip");
-    assert!(text(&card).contains("6 listings known"));
+    assert!(text(&card).contains("7 listings known"), "{card}");
+    assert!(text(&card).contains("📅 10–15 Nov 2026 · 5 nights"));
     let buttons: Vec<&str> = card["reply_markup"]["inline_keyboard"][0]
         .as_array()
         .unwrap()
@@ -197,6 +237,15 @@ fn full_user_journey() {
         .map(|b| b["callback_data"].as_str().unwrap())
         .collect();
     assert_eq!(buttons, ["p:1", "n:1", "d:1"]);
+
+    // Check this search more often.
+    let mark = tg.calls().len();
+    tg.user_says(ME, "/every 1 1");
+    tg.wait_message(mark, ME, "Minutes must be a number from 2");
+    tg.user_says(ME, "/every 1 5");
+    tg.wait_message(mark, ME, "will be checked every 5 min");
+    tg.user_says(ME, "/list");
+    tg.wait_message(mark, ME, "every 5 min");
 
     // Pause with the button: the card updates, and checks are skipped.
     let mark = tg.calls().len();
@@ -253,6 +302,18 @@ fn full_user_journey() {
         m == "sendPhoto" && text(b).contains("/rooms/44")
     });
 
+    // The calendar check itself fails: still alerted (never miss a place),
+    // marked as unconfirmed.
+    *airbnb.calendar_down.lock().unwrap() = true;
+    airbnb.add(46);
+    let mark = tg.calls().len();
+    tg.user_says(ME, "/check");
+    let (_, unconfirmed) = tg.wait_for(mark, "photo for 46", |m, b| {
+        m == "sendPhoto" && text(b).contains("/rooms/46")
+    });
+    assert!(text(&unconfirmed).contains("⚠️ Couldn't confirm availability"));
+    *airbnb.calendar_down.lock().unwrap() = false;
+
     // A second search, then delete it with confirmation.
     let mark = tg.calls().len();
     tg.user_says(ME, "https://www.airbnb.com/s/Porto/homes?adults=1");
@@ -283,7 +344,8 @@ fn full_user_journey() {
     let searches = saved["searches"].as_array().unwrap();
     assert_eq!(searches.len(), 1);
     assert_eq!(searches[0]["name"], "Lisbon Nov");
-    assert_eq!(searches[0]["seen"].as_array().unwrap().len(), 8);
+    assert_eq!(searches[0]["seen"].as_array().unwrap().len(), 10);
+    assert_eq!(searches[0]["interval_minutes"], 5);
 
     // After a restart nothing is re-sent; only genuinely new listings are.
     let bot = Running::start(&config);
@@ -308,7 +370,7 @@ fn many_new_listings_are_capped_and_summarized() {
 
     let mark = tg.calls().len();
     tg.user_says(ME, LINK);
-    tg.wait_message(mark, ME, "1 current listings saved");
+    tg.wait_message(mark, ME, "1 listing(s) for your dates saved");
 
     for id in 100..115 {
         airbnb.add(id);
