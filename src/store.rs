@@ -157,6 +157,8 @@ mod tests {
 
     fn tmp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("abn-store-{}-{name}", std::process::id()));
+        // Start empty: a reused PID must not see an earlier run's files.
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("searches.json")
     }

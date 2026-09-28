@@ -140,12 +140,23 @@ impl Telegram {
         .map(|_| ())
     }
 
+    /// The bot's @username; also proves the token works.
+    pub fn get_me(&self) -> Result<String> {
+        let me = self.call("getMe", json!({}))?;
+        Ok(me
+            .get("username")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string())
+    }
+
     pub fn set_commands(&self) -> Result<()> {
         self.call(
             "setMyCommands",
             json!({"commands": [
                 {"command": "list", "description": "Your searches"},
                 {"command": "check", "description": "Check all searches now"},
+                {"command": "selftest", "description": "Test Airbnb access and calendar checks"},
                 {"command": "help", "description": "How to use the bot"},
             ]}),
         )

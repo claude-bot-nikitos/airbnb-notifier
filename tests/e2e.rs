@@ -484,3 +484,68 @@ fn wait_until(cond: impl Fn() -> bool) {
         std::thread::sleep(Duration::from_millis(50));
     }
 }
+
+#[test]
+fn diagnostics_from_the_chat() {
+    let dir = temp_dir("diag");
+    let tg = FakeTelegram::start();
+    let airbnb = FakeAirbnb::start(&[1, 2, 3], 10);
+    airbnb.other_dates.lock().unwrap().push(9);
+    let config = write_config(&dir, &tg, &airbnb);
+    let bot = Running::start(&config);
+
+    // Before any search: the sample search is used.
+    let mark = tg.calls().len();
+    tg.user_says(ME, "/selftest");
+    tg.wait_message(mark, ME, "Running self-test");
+    let report = tg.wait_message(mark, ME, "All good.");
+    assert!(
+        text(&report).contains("<b>Airbnb search (sample: Lisbon)</b>"),
+        "{report}"
+    );
+
+    let mark = tg.calls().len();
+    tg.user_says(ME, LINK);
+    tg.wait_message(mark, ME, "is live");
+    airbnb.booked.lock().unwrap().insert(2);
+
+    // /test lists every result with its status and a link.
+    let mark = tg.calls().len();
+    tg.user_says(ME, "/test 1");
+    let listing = tg.wait_message(mark, ME, "🔎 <b>#1 Lisbon, Portugal</b>");
+    let body = text(&listing);
+    assert!(body.contains("4 listings, 3 for your dates"), "{body}");
+    assert!(body.contains("🟢 <a href="), "{body}");
+    assert!(body.contains(">Flat 1</a> — FREE"), "{body}");
+    assert!(body.contains("🔴 <a href="), "{body}");
+    assert!(
+        body.contains(">Flat 2</a> — BOOKED (no check-in on 2026-11-10)"),
+        "{body}"
+    );
+    assert!(
+        body.contains(">Flat 9</a> — OTHER DATES 2026-12-01..2026-12-06"),
+        "{body}"
+    );
+
+    // /selftest now checks the saved search, and reports failures.
+    *airbnb.calendar_down.lock().unwrap() = true;
+    let mark = tg.calls().len();
+    tg.user_says(ME, "/selftest");
+    let report = tg.wait_message(mark, ME, "Some checks failed.");
+    assert!(
+        text(&report).contains("❌ <b>Calendar check #1 Lisbon, Portugal</b>"),
+        "{report}"
+    );
+
+    let mark = tg.calls().len();
+    tg.user_says(ME, "/test 1");
+    tg.wait_message(mark, ME, "UNKNOWN (calendar: HTTP 500)");
+    *airbnb.fail_with.lock().unwrap() = Some(403);
+    tg.user_says(ME, "/test 1");
+    tg.wait_message(mark, ME, "❌ HTTP 403 from Airbnb");
+    tg.user_says(ME, "/test 9");
+    tg.wait_message(mark, ME, "No search #9");
+    tg.user_says(ME, "/test");
+    tg.wait_message(mark, ME, "Usage: /test");
+    bot.stop();
+}

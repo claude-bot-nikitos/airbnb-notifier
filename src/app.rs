@@ -10,6 +10,7 @@ use anyhow::{Result, anyhow};
 
 use crate::airbnb::{self, Fetcher};
 use crate::config::Config;
+use crate::diag::{self, Check, Status};
 use crate::store::Store;
 use crate::telegram::Telegram;
 use crate::{bot, poller};
@@ -103,49 +104,128 @@ pub fn test(path: &Path, url: &str, pages: u32, verify: bool, out: &mut dyn Writ
     let url = fetcher.resolve(url)?;
     writeln!(out, "Search URL: {url}")?;
     writeln!(out, "Default name: {}", airbnb::default_name(&url))?;
-    let wanted = airbnb::search_dates(&url);
-    match &wanted {
-        Some(stay) => writeln!(out, "Dates: {}", airbnb::stay_label(stay))?,
+    match airbnb::search_dates(&url) {
+        Some(stay) => writeln!(out, "Dates: {}", airbnb::stay_label(&stay))?,
         None => writeln!(out, "Dates: none (flexible search, nothing to verify)")?,
     }
-    let scan = fetcher.fetch_all(&url, pages.max(1))?;
-    let exact = scan
-        .listings
-        .iter()
-        .filter(|l| l.matches_dates(wanted.as_ref()))
-        .count();
-    writeln!(
-        out,
-        "Found {} listings, {exact} for your dates{}:",
-        scan.listings.len(),
-        if scan.complete {
-            ""
-        } else {
-            " (more pages not read)"
-        }
-    )?;
-    for l in &scan.listings {
-        let name = if l.name.is_empty() { &l.title } else { &l.name };
-        let status = if !l.matches_dates(wanted.as_ref()) {
-            let (a, b) = l.dates.clone().unwrap_or_default();
-            format!("OTHER DATES {a}..{b}")
-        } else {
-            match (&wanted, verify) {
-                (Some(stay), true) => match fetcher.verify(&url, l.id, stay) {
-                    airbnb::Verdict::Available => "FREE".to_string(),
-                    airbnb::Verdict::Unavailable(why) => format!("BOOKED ({why})"),
-                    airbnb::Verdict::Unknown(why) => format!("UNKNOWN ({why})"),
-                },
-                _ => "your dates".to_string(),
-            }
-        };
+    let max_verify = if verify { usize::MAX } else { 0 };
+    let b = diag::breakdown(&fetcher, &url, pages, max_verify)?;
+    writeln!(out, "Found {}:", b.summary())?;
+    for r in &b.rows {
         writeln!(
             out,
-            "  {:>20}  [{status}]  {}  |  {}  |  {}",
-            l.id, name, l.price, l.rating
+            "  {:>20}  [{}]  {}  |  {}  |  {}",
+            r.id, r.status, r.name, r.price, r.rating
         )?;
     }
     Ok(())
+}
+
+/// Live smoke test of this machine's setup. Returns whether nothing failed.
+pub fn selftest(path: &Path, out: &mut dyn Write) -> Result<bool> {
+    let mut checks = Vec::new();
+    let cfg = match Config::load(path) {
+        Ok(c) => {
+            checks.push(Check::new(Status::Ok, "Config", path.display().to_string()));
+            c
+        }
+        Err(e) => {
+            checks.push(Check::new(Status::Fail, "Config", format!("{e:#}")));
+            return report(&checks, out);
+        }
+    };
+    if cfg.allowed_users.is_empty() {
+        checks.push(Check::new(
+            Status::Warn,
+            "Users",
+            "nobody is allowed yet: `airbnb-notifier user add <id>`",
+        ));
+    } else {
+        checks.push(Check::new(
+            Status::Ok,
+            "Users",
+            format!("{} allowed", cfg.allowed_users.len()),
+        ));
+    }
+    if cfg.bot_token.is_empty() {
+        checks.push(Check::new(
+            Status::Fail,
+            "Telegram",
+            "bot_token is empty: `airbnb-notifier init --token …`",
+        ));
+    } else {
+        let tg = Telegram::new(&cfg.telegram_api_url, &cfg.bot_token);
+        checks.push(match tg.get_me() {
+            Ok(name) => Check::new(
+                Status::Ok,
+                "Telegram",
+                format!("token works, bot is @{name}"),
+            ),
+            Err(e) => Check::new(Status::Fail, "Telegram", format!("{e:#}")),
+        });
+    }
+    // The service writes searches next to the config.
+    let probe = cfg.data_file.with_file_name(".selftest-write");
+    checks.push(
+        match crate::util::write_atomic(&probe, b"ok")
+            .and_then(|_| Ok(std::fs::remove_file(&probe)?))
+        {
+            Ok(()) => Check::new(Status::Ok, "Data file", cfg.data_file.display().to_string()),
+            Err(e) => Check::new(
+                Status::Fail,
+                "Data file",
+                format!("can't write next to {}: {e:#}", cfg.data_file.display()),
+            ),
+        },
+    );
+    let fetcher = match fetcher(&cfg) {
+        Ok(f) => f,
+        Err(e) => {
+            checks.push(Check::new(Status::Fail, "Proxies", format!("{e:#}")));
+            return report(&checks, out);
+        }
+    };
+    let searches: Vec<(String, String)> = match Store::load(&cfg.data_file) {
+        Ok(st) => st
+            .all()
+            .iter()
+            .filter(|s| !s.paused)
+            .take(5)
+            .map(|s| (format!("#{} {}", s.id, s.name), s.url.clone()))
+            .collect(),
+        Err(e) => {
+            checks.push(Check::new(Status::Fail, "Searches", format!("{e:#}")));
+            vec![]
+        }
+    };
+    if searches.is_empty() {
+        checks.extend(diag::check_search(
+            &fetcher,
+            "(sample: Lisbon)",
+            &diag::sample_search_url(),
+        ));
+    }
+    for (label, url) in &searches {
+        checks.extend(diag::check_search(&fetcher, label, url));
+    }
+    report(&checks, out)
+}
+
+fn report(checks: &[Check], out: &mut dyn Write) -> Result<bool> {
+    for c in checks {
+        writeln!(out, "{}", c.text())?;
+    }
+    let ok = diag::passed(checks);
+    writeln!(
+        out,
+        "{}",
+        if ok {
+            "\nAll good."
+        } else {
+            "\nSome checks FAILED."
+        }
+    )?;
+    Ok(ok)
 }
 
 /// Runs the bot until `stop` is set.

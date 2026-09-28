@@ -57,6 +57,8 @@ short links. It follows short links until it reaches the search URL.
 | `/list` | your searches, each with ⏸ Pause / ✏️ Rename / 🗑 Delete buttons |
 | `/check` | check all your searches now |
 | `/every <id> <minutes>` | how often to check this search (2–1440, or `default`) |
+| `/test <id>` | every result of the search right now: 🟢 free · 🔴 listed but booked · ⚪ other dates only |
+| `/selftest` | check that Airbnb access and calendar checks work from the Pi |
 | `/rename <id> <name>` | rename a search |
 | `/pause <id>`, `/resume <id>`, `/delete <id>` | same actions as the buttons |
 
@@ -158,6 +160,7 @@ airbnb-notifier run                  run the bot
 airbnb-notifier user add <id>        allow a Telegram user
 airbnb-notifier user remove <id>     revoke access (their searches pause)
 airbnb-notifier user list
+airbnb-notifier selftest             live smoke test of this machine (exit code 1 on failure)
 airbnb-notifier test <url> [--pages N] [--verify]
                                      fetch a search once and print the listings: whether each
                                      is for your dates, and with --verify if it is really free
@@ -188,6 +191,35 @@ page_delay_ms = 1500                          # pause between Airbnb requests (+
 telegram_api_url = "https://api.telegram.org" # e.g. a self-hosted Bot API server
 airbnb_origin = "http://127.0.0.1:8080"       # testing only: fetch searches from a fake server
 ```
+
+## Checking it works on your Pi
+
+The automated tests run against fake Airbnb and Telegram servers. These checks
+run against the **real** ones, from the machine the bot runs on:
+
+```bash
+sudo airbnb-notifier selftest
+```
+```
+✅ Config: /opt/airbnb-notifier/config.toml
+✅ Users: 1 allowed
+✅ Telegram: token works, bot is @my_airbnb_bot
+✅ Data file: /opt/airbnb-notifier/searches.json
+✅ Airbnb search #1 Imperia: 11 listings on page 1, 3 for your dates
+✅ Calendar check #1 Imperia: works (listing 1234 is free)
+
+All good.
+```
+
+It checks up to 5 active searches (or a sample Lisbon search if there are none)
+and exits with code 1 if anything failed, so you can also run it from cron.
+
+From Telegram:
+
+- `/selftest`: the same Airbnb and calendar checks, replied in the chat.
+- `/test <id>`: every current result of a search with its live status. Compare
+  it with Airbnb in your browser: 🟢 should be bookable, and ⚪ places are the
+  "similar dates" filler that never triggers alerts.
 
 ## Avoiding blocks
 

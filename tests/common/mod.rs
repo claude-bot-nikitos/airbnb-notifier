@@ -393,6 +393,9 @@ impl FakeTelegram {
                             std::thread::sleep(Duration::from_millis(20));
                         }
                     }
+                    "getMe" => Response::json(
+                        json!({"ok": true, "result": {"id": 1, "is_bot": true, "username": "fake_bot"}}),
+                    ),
                     _ => {
                         let id = message_id.fetch_add(1, Ordering::Relaxed);
                         Response::json(json!({"ok": true, "result": {"message_id": id}}))

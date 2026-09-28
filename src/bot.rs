@@ -56,6 +56,8 @@ for your dates, after checking its calendar — or when a place that was booked 
 /list — your searches with Pause / Rename / Delete buttons\n\
 /check — check all your searches now\n\
 /every <i>id</i> <i>minutes</i> — how often to check a search (e.g. /every 1 5)\n\
+/test <i>id</i> — show every result now: free / booked / other dates\n\
+/selftest — check that Airbnb access and calendar checks work\n\
 /rename <i>id</i> <i>name</i>, /pause <i>id</i>, /resume <i>id</i>, /delete <i>id</i>\n\n\
 You can have as many searches as you like.";
 
@@ -169,6 +171,11 @@ impl<A: Api> Bot<A> {
                 "start" | "help" => self.say(chat_id, HELP),
                 "list" => self.list(chat_id),
                 "check" => self.check_now(chat_id),
+                "selftest" => self.selftest(chat_id),
+                "test" => match id_arg() {
+                    Some(id) => self.test_search(chat_id, id),
+                    None => self.say(chat_id, "Usage: /test <i>id</i> (see /list)"),
+                },
                 "pause" | "resume" => match id_arg() {
                     Some(id) => {
                         let msg = self.set_paused(chat_id, id, cmd == "pause");
@@ -348,6 +355,66 @@ impl<A: Api> Bot<A> {
         s.name = name.clone();
         self.save(&store);
         format!("✏️ Search <b>#{id}</b> is now called <b>{}</b>", esc(&name))
+    }
+
+    /// Live checks of this chat's searches (or a sample one).
+    fn selftest(&self, chat_id: i64) {
+        self.say(chat_id, "🔎 Running self-test against Airbnb…");
+        let searches: Vec<(String, String)> = {
+            let store = self.store.lock().unwrap();
+            store
+                .for_chat(chat_id)
+                .into_iter()
+                .filter(|s| !s.paused)
+                .take(5)
+                .map(|s| (format!("#{} {}", s.id, s.name), s.url.clone()))
+                .collect()
+        };
+        let mut checks = vec![crate::diag::Check::new(
+            crate::diag::Status::Ok,
+            "Bot",
+            format!("running v{}", env!("CARGO_PKG_VERSION")),
+        )];
+        if searches.is_empty() {
+            let url = crate::diag::sample_search_url();
+            checks.extend(crate::diag::check_search(
+                &self.fetcher,
+                "(sample: Lisbon)",
+                &url,
+            ));
+        }
+        for (label, url) in &searches {
+            checks.extend(crate::diag::check_search(&self.fetcher, label, url));
+        }
+        let verdict = if crate::diag::passed(&checks) {
+            "All good."
+        } else {
+            "Some checks failed."
+        };
+        let lines: Vec<String> = checks.iter().map(|c| c.html()).collect();
+        self.say(chat_id, &format!("{}\n\n{verdict}", lines.join("\n")));
+    }
+
+    /// Every result of one search right now, with calendar checks.
+    fn test_search(&self, chat_id: i64, id: u32) {
+        let search = self
+            .store
+            .lock()
+            .unwrap()
+            .for_chat(chat_id)
+            .into_iter()
+            .find(|s| s.id == id)
+            .cloned();
+        let Some(s) = search else {
+            self.say(chat_id, &format!("No search #{id}. See /list"));
+            return;
+        };
+        self.say(chat_id, &format!("🔎 Checking #{id} on Airbnb…"));
+        let pages = self.last_config.as_ref().map_or(1, |c| c.max_pages);
+        match crate::diag::breakdown(&self.fetcher, &s.url, pages, 10) {
+            Ok(b) => self.say(chat_id, &b.html(&format!("#{id} {}", s.name), 30)),
+            Err(e) => self.say(chat_id, &format!("❌ {}", esc(&format!("{e:#}")))),
+        }
     }
 
     fn set_interval(&self, chat_id: i64, id: u32, minutes: &str) -> String {

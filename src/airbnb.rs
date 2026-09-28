@@ -417,7 +417,7 @@ fn day_number(s: &str) -> Option<i64> {
 }
 
 /// Inverse of `day_number`.
-fn date_string(z: i64) -> String {
+pub fn date_string(z: i64) -> String {
     let z = z + 719468;
     let era = z.div_euclid(146097);
     let doe = z - era * 146097;

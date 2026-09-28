@@ -52,7 +52,7 @@ fn sends_messages_with_keyboard_photos_edits_and_answers() {
         .iter()
         .map(|c| c["command"].as_str().unwrap())
         .collect();
-    assert_eq!(commands, ["list", "check", "help"]);
+    assert_eq!(commands, ["list", "check", "selftest", "help"]);
 }
 
 #[test]

@@ -164,3 +164,143 @@ fn broken_config_is_reported() {
     std::fs::write(&cfg, "bot_token = \"x\"\nproxies = [\"nonsense\"]").unwrap();
     assert!(fails(&cfg, &["run"]).contains("bad proxy"));
 }
+
+fn selftest_setup(name: &str) -> (std::path::PathBuf, FakeAirbnb, common::FakeTelegram) {
+    let dir = temp_dir(name);
+    let cfg = dir.join("config.toml");
+    let airbnb = FakeAirbnb::start(&[11, 12], 10);
+    let tg = common::FakeTelegram::start();
+    Config {
+        bot_token: common::TOKEN.into(),
+        allowed_users: vec![7],
+        page_delay_ms: 0,
+        telegram_api_url: tg.api_url(),
+        airbnb_origin: Some(airbnb.server.url()),
+        ..Config::default()
+    }
+    .save(&cfg)
+    .unwrap();
+    (cfg, airbnb, tg)
+}
+
+#[test]
+fn selftest_passes_on_a_working_setup() {
+    let (cfg, airbnb, _tg) = selftest_setup("selftest-ok");
+    let out = ok(&cfg, &["selftest"]);
+    assert!(out.contains("✅ Config"), "{out}");
+    assert!(out.contains("✅ Users: 1 allowed"), "{out}");
+    assert!(
+        out.contains("✅ Telegram: token works, bot is @fake_bot"),
+        "{out}"
+    );
+    assert!(out.contains("✅ Data file"), "{out}");
+    // No saved searches yet: a dated sample search is used.
+    assert!(
+        out.contains("✅ Airbnb search (sample: Lisbon): 2 listings on page 1, 2 for your dates"),
+        "{out}"
+    );
+    assert!(
+        out.contains("✅ Calendar check (sample: Lisbon): works (listing 11 is free)"),
+        "{out}"
+    );
+    assert!(out.contains("All good."), "{out}");
+    let req = &airbnb.search_requests()[0];
+    assert!(
+        req.target
+            .starts_with("/s/Lisbon--Portugal/homes?adults=2&checkin=20")
+    );
+}
+
+#[test]
+fn selftest_checks_saved_searches_and_fails_loudly() {
+    let (cfg, airbnb, _tg) = selftest_setup("selftest-fail");
+    std::fs::write(
+        cfg.with_file_name("searches.json"),
+        r#"{"next_id":3,"searches":[
+            {"id":1,"chat_id":7,"name":"Imperia","url":"https://www.airbnb.com/s/Imperia/homes?checkin=2026-11-10&checkout=2026-11-15"},
+            {"id":2,"chat_id":7,"name":"Flexible","url":"https://www.airbnb.com/s/Rome/homes"}]}"#,
+    )
+    .unwrap();
+    let out = ok(&cfg, &["selftest"]);
+    assert!(out.contains("✅ Calendar check #1 Imperia: works"), "{out}");
+    // A booked listing still proves the calendar check works.
+    airbnb.booked.lock().unwrap().insert(11);
+    let out = ok(&cfg, &["selftest"]);
+    assert!(
+        out.contains("✅ Calendar check #1 Imperia: works (listing 11: no check-in on 2026-11-10)"),
+        "{out}"
+    );
+    assert!(
+        out.contains("⚠️ Calendar check #2 Flexible: skipped: the search has no dates"),
+        "{out}"
+    );
+
+    // Calendar API broken → failure and a non-zero exit code.
+    *airbnb.calendar_down.lock().unwrap() = true;
+    let out = run(&cfg, &["selftest"]);
+    assert!(!out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        text.contains("❌ Calendar check #1 Imperia: calendar: HTTP 500"),
+        "{text}"
+    );
+    assert!(text.contains("Some checks FAILED."), "{text}");
+
+    // Blocked by Airbnb.
+    *airbnb.fail_with.lock().unwrap() = Some(403);
+    let out = String::from_utf8(run(&cfg, &["selftest"]).stdout).unwrap();
+    assert!(
+        out.contains("❌ Airbnb search #1 Imperia: HTTP 403"),
+        "{out}"
+    );
+
+    // Nothing for the searched dates / nothing at all.
+    *airbnb.fail_with.lock().unwrap() = None;
+    airbnb.listings.lock().unwrap().clear();
+    let out = String::from_utf8(run(&cfg, &["selftest"]).stdout).unwrap();
+    assert!(
+        out.contains("⚠️ Airbnb search #1 Imperia: 0 listings"),
+        "{out}"
+    );
+    assert!(out.contains("skipped: no listing for your dates"), "{out}");
+}
+
+#[test]
+fn selftest_reports_config_problems() {
+    let dir = temp_dir("selftest-config");
+    let cfg = dir.join("config.toml");
+    std::fs::write(&cfg, "allowed_users = \"oops\"").unwrap();
+    let out = run(&cfg, &["selftest"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8(out.stdout).unwrap().contains("❌ Config"));
+
+    // Empty config: no users, no token.
+    std::fs::write(&cfg, "").unwrap();
+    let out = String::from_utf8(run(&cfg, &["selftest"]).stdout).unwrap();
+    assert!(out.contains("⚠️ Users: nobody is allowed yet"), "{out}");
+    assert!(out.contains("❌ Telegram: bot_token is empty"), "{out}");
+
+    // Wrong token, unwritable data dir, bad proxy.
+    std::fs::create_dir_all(dir.join("data-is-a-file")).unwrap();
+    std::fs::write(dir.join("blocker"), "x").unwrap();
+    std::fs::write(
+        &cfg,
+        "bot_token = \"wrong\"\ntelegram_api_url = \"http://127.0.0.1:1\"\n\
+         data_file = \"blocker/searches.json\"\nproxies = [\"nonsense\"]\n",
+    )
+    .unwrap();
+    let out = String::from_utf8(run(&cfg, &["selftest"]).stdout).unwrap();
+    assert!(out.contains("❌ Telegram: telegram getMe"), "{out}");
+    assert!(out.contains("❌ Data file: can't write"), "{out}");
+    assert!(out.contains("❌ Proxies: bad proxy"), "{out}");
+}
+
+#[test]
+fn selftest_reports_an_unreadable_searches_file() {
+    let (cfg, _airbnb, _tg) = selftest_setup("selftest-badstore");
+    std::fs::write(cfg.with_file_name("searches.json"), "{broken").unwrap();
+    let out = String::from_utf8(run(&cfg, &["selftest"]).stdout).unwrap();
+    assert!(out.contains("❌ Searches"), "{out}");
+    // Falls back to the sample search so Airbnb access is still tested.
+    assert!(out.contains("(sample: Lisbon)"), "{out}");
+}

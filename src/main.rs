@@ -37,6 +37,9 @@ enum Command {
     },
     /// Run the bot
     Run,
+    /// Live smoke test: config, Telegram, data file, and each saved search
+    /// against the real Airbnb (search page + calendar check)
+    Selftest,
     /// Manage who may use the bot
     User {
         #[command(subcommand)]
@@ -92,5 +95,11 @@ fn real_main() -> Result<()> {
             app::user(&cli.config, action, out)
         }
         Command::Test { url, pages, verify } => app::test(&cli.config, &url, pages, verify, out),
+        Command::Selftest => {
+            if !app::selftest(&cli.config, out)? {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
     }
 }
